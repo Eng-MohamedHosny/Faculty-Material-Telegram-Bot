@@ -1,0 +1,237 @@
+# 🎓 Faculty Material Telegram Bot (FCAI Bot)
+> **بوت تيليجرام متكامل لإدارة ومشاركة المحتوى الأكاديمي لكلية الحاسبات والمعلومات**  
+> مبني على معمارية سحابية مجانية فائقة السرعة (**Serverless Edge Architecture**) بدون أي استهلاك لموارد السيرفرات التقليدية، مع نظام صلاحيات دقيق (RBAC)، ولوحة تحكم تفاعلية للمشرفين والليدرز مباشرة من داخل شات تيليجرام.
+
+---
+
+## 🌟 أبرز مميزات البوت (Key Features)
+
+### 1. معمارية سحابية مجانية 100% بدون خوادم (Zero Cost & Zero Cold-Start)
+- **Cloudflare Workers:** يعمل بنظام Webhooks على الحافة (Edge) بزمن استجابة فوري (< 50ms) وبدون وضع خمول (No Sleep Mode).
+- **Cloudflare D1 (SQLite):** قاعدة بيانات سريعة مدمجة على شبكة كلاودفلير السحابية.
+- **تخزين لا نهائي للملفات:** استغلال سيرفرات تيليجرام الدائمة عبر `file_id` وقناة أرشيف احتياطية خاصة، مما يعني عدم تخزين أي ملف على الخادم (0MB Disk Space).
+
+### 2. الشجرة الأكاديمية الديناميكية (Dynamic Academic Hierarchy)
+- لا توجد أي مادة أو قسم مكتوب برمجياً بشكل ثابت (No Hardcoding).
+- هيكل شجري مرن: **الأقسام (CS, IT, IS, Networks) ⬅️ الفصول الدراسية (الترم 1، الترم 2) ⬅️ المقررات الدراسية ⬅️ التصنيفات الأكاديمية الخمسة ⬅️ المحاضرات والسكاشن ⬅️ الملفات**.
+- التصنيفات الأكاديمية القياسية الموحدة:
+  - 📂 **المحاضرات** (صف عريض منفرد)
+  - 📝 **السكاشن والعملي** | 📖 **الملخصات والمراجعات** (صف مزدوج)
+  - 📅 **الميدتيرم والكويزات** | 📋 **امتحانات الفاينال** (صف مزدوج)
+
+### 3. نظام الصلاحيات المخصص (Role-Based Access Control - RBAC)
+- **المسؤول العام (Super Admin):** تحكم كامل في كل أقسام الكلية، قناة الأرشيف، وتعيين الليدرز.
+- **الليدر (Leader):** يمنحه المسؤول العام صلاحية إدارة قسم أو أكثر (مثال: ليدر CS يدير CS فقط، أو ليدر يدير IS و IT معاً).
+  - داخل الأقسام المخصصة له: يمتلك صلاحية رفع الملفات، إضافة المواد، تعديل الأسماء، وتخصيص العرض، والحذف.
+  - داخل باقي الأقسام: يعامله البوت كـ **طالب عادي تماماً** دون إظهار أي أزرار إدارة.
+- **الطالب (Student):** تصفح نظيف وسريع، وتحميل مباشر للملفات.
+
+### 4. واجهة استخدام مزدوجة وسلسة (Dual View Mode)
+- للمسؤولين: إمكانية التبديل بين **`🎓 وضع الطالب`** (لتجربة تصفح نظيفة تماماً) و**`⚙️ وضع المشرف`** (لإظهار أدوات الإدارة).
+- **التسليم الذكي للملفات (Leaf Delivery):** عند وصول الطالب إلى محاضرة أو سكشن فرعي، يقوم البوت بإرسال الملفات فوراً دون نقله إلى شاشات فارغة، مع إبقاء أزرار المحاضرات متاحة للتنقل السريع.
+
+### 5. أدوات الإدارة المتقدمة من تيليجرام مباشرة
+- **الرفع الجماعي الصامت (Silent Batch Upload):** إرسال عدد غير محدود من ملفات PDF والصور والفيديوهات دفعة واحدة دون رسائل تشويش متكررة، مع أرشفة تلقائية فورية في القناة السرية.
+- **الحذف المتعدد الفوري (Optimistic Multi-Delete):** حذف عدة ملفات متتالية دون إغلاق القائمة، مع حذف الملف تلقائياً من قناة الأرشيف ومن قاعدة البيانات في أجزاء من الثانية.
+- **تخصيص العرض والصفوف:** تعديل أزرار القائمة محلياً (صف عريض 🔘 ↔️ صف مزدوج 👥) مع ميزة تعميم التنسيق على باقي مواد القسم أو كل مواد الكلية.
+- **تجميع المحتوى بضغطة زر (Download All):** زر `📦 عرض وتحميل كل المحتوى` لتجميع وتحميل جميع محاضرات أو سكاشن المادة دفعة واحدة بنقرة واحدة.
+
+---
+
+## 🏗️ البنية التقنية (System Architecture)
+
+```
+                     +---------------------------------------+
+                     |         Telegram Messenger            |
+                     |  Students / Leaders / Super Admin     |
+                     +-------------------+-------------------+
+                                         |  HTTPS Webhook
+                                         v
+                     +---------------------------------------+
+                     |       Cloudflare Workers (Edge)       |
+                     |       Framework: grammY (TS)          |
+                     |  - Routing & Navigation State Machine |
+                     |  - Role-Based Access Control (RBAC)   |
+                     |  - Instant Optimistic UI Handlers     |
+                     +---------+-------------------+---------+
+                               |                   |
+            Fast SQL Queries   |                   | Telegram API Calls
+                               v                   v
+            +----------------------+     +----------------------------+
+            | Cloudflare D1        |     | Telegram Servers           |
+            | (Edge SQLite)        |     | - Permanent File IDs       |
+            | - users              |     | - Backup Archive Channel   |
+            | - nodes              |     | - Media Groups Delivery    |
+            | - materials          |     +----------------------------+
+            | - user_permissions   |
+            | - settings           |
+            +----------------------+
+```
+
+---
+
+## 🗄️ نموذج قاعدة البيانات (Database Schema)
+
+```sql
+-- 1. المستخدمين والصلاحيات وحالة التصفح
+CREATE TABLE users (
+  telegram_id INTEGER PRIMARY KEY,
+  full_name TEXT,
+  role TEXT DEFAULT 'student',            -- 'student' | 'leader' | 'super_admin'
+  managed_node_id INTEGER DEFAULT NULL,  
+  current_node_id INTEGER DEFAULT NULL,  -- معرف المجلد الحالي للتنقل الدقيق
+  bot_state TEXT DEFAULT 'browsing',     -- 'browsing' | 'awaiting_folder' | 'uploading' | 'renaming' | 'awaiting_leader_id'
+  view_mode TEXT DEFAULT 'admin'         -- 'admin' | 'student'
+);
+
+-- 2. الشجرة الهرمية للأقسام والمواد (Hierarchy Tree)
+CREATE TABLE nodes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  parent_id INTEGER DEFAULT NULL,        -- معرف المجلد الأب (NULL للأقسام الرئيسية)
+  title TEXT NOT NULL,                   -- نص الزر
+  sort_order INTEGER DEFAULT 0,          -- ترتيب العرض
+  created_by INTEGER,
+  is_full_width INTEGER DEFAULT 0,       -- 1: صف كامل منفرد | 0: صف مزدوج
+  FOREIGN KEY (parent_id) REFERENCES nodes(id) ON DELETE CASCADE
+);
+
+-- 3. الملفات والمحتوى الأكاديمي (Materials)
+CREATE TABLE materials (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  node_id INTEGER NOT NULL,              -- القسم التابع له
+  file_name TEXT NOT NULL,               -- اسم الملف
+  telegram_file_id TEXT NOT NULL,        -- معرّف تيليجرام الدائم
+  file_type TEXT NOT NULL,               -- 'document' | 'video' | 'photo' | 'audio' | 'link'
+  caption TEXT DEFAULT NULL,
+  uploaded_by INTEGER,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  backup_message_id INTEGER DEFAULT NULL,-- معرّف الرسالة بقناة الأرشيف للحذف التلقائي
+  FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE
+);
+
+-- 4. جدول تخصيص صلاحيات الأقسام لليدرز (RBAC)
+CREATE TABLE user_permissions (
+  telegram_id INTEGER NOT NULL,
+  node_id INTEGER NOT NULL,              -- معرف القسم الممنوح (CS, IT, إلخ)
+  PRIMARY KEY (telegram_id, node_id)
+);
+
+-- 5. إعدادات النظام (Settings)
+CREATE TABLE settings (
+  key TEXT PRIMARY KEY,
+  value TEXT
+);
+```
+
+---
+
+## 🚀 دليل التثبيت والنشر خطوة بخطوة (Step-by-Step Setup)
+
+### المتطلبات الأساسية
+- تثبيت [Node.js](https://nodejs.org/) (إصدار 18 أو أحدث).
+- حساب مجاني على [Cloudflare](https://dash.cloudflare.com/).
+- حساب تيليجرام لإنشاء البوت.
+
+### الخطوة 1: تجهيز بوت تيليجرام وقناة الأرشيف
+1. افتح تيليجرام وتحدث مع [@BotFather](https://t.me/BotFather).
+2. أرسل الأمر `/newbot` واختر اسماً ومعرفاً للبوت، واحفظ **Bot Token**.
+3. أنشئ قناة تيليجرام خاصة (Private Channel) باسم `أرشيف ملفات البوت`.
+4. أضف البوت إلى القناة وقم بترقيته إلى **مشرف (Administrator)** بصلاحية نشر الرسائل وحذفها.
+5. احصل على معرّف حسابك الشخصي (Telegram ID) عبر إرسال `/id` في البوت بعد تشغيله أو عبر [@userinfobot](https://t.me/userinfobot).
+
+### الخطوة 2: إعداد المشروع محلياً
+```bash
+# تثبيت الحزم البرمجية
+npm install
+
+# تسجيل الدخول إلى Cloudflare عبر أداة Wrangler
+npx wrangler login
+```
+
+### الخطوة 3: إنشاء قاعدة بيانات Cloudflare D1
+```bash
+# إنشاء قاعدة البيانات
+npx wrangler d1 create college_bot_db
+```
+- انسخ `database_id` الناتج وضعه داخل ملف `wrangler.toml`:
+```toml
+name = "faculty-telegram-bot"
+main = "src/index.ts"
+compatibility_date = "2024-10-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+SUPER_ADMIN_ID = "YOUR_TELEGRAM_ID"
+BACKUP_CHANNEL_ID = "-100XXXXXXXXXX"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "college_bot_db"
+database_id = "YOUR_DATABASE_ID"
+```
+
+### الخطوة 4: تنفيذ هيكل الجداول وملفات البداية (Seeds)
+```bash
+# إنشاء الجداول الأساسية
+npx wrangler d1 execute college_bot_db --remote --file=./schema.sql
+
+# زراعة الأقسام الرئيسية والمواد (Seeds)
+npx wrangler d1 execute college_bot_db --remote --file=./seed_all_departments.sql
+npx wrangler d1 execute college_bot_db --remote --file=./seed_cs_term1.sql
+```
+
+### الخطوة 5: حفظ التوكن ونشر البوت (Deploy)
+```bash
+# تعيين التوكن كمتغير سري آمن في كلاودفلير
+npx wrangler secret put BOT_TOKEN
+
+# نشر كود المشروع على سيرفرات Cloudflare Workers
+npx wrangler deploy
+```
+
+### الخطوة 6: تفعيل الـ Webhook
+بعد النشر ستحصل على رابط الـ Worker (مثال: `https://faculty-telegram-bot.yourname.workers.dev`).
+قم بتفعيل الـ Webhook عن طريق فتح الرابط التالي في المتصفح مرة واحدة:
+```text
+https://api.telegram.org/bot<YOUR_BOT_TOKEN>/setWebhook?url=https://faculty-telegram-bot.yourname.workers.dev
+```
+
+---
+
+## 📋 دليل الأوامر (Bot Commands)
+
+| الأمر | الوظيفة | الصلاحية |
+| :--- | :--- | :--- |
+| `/start` | 🏠 فتح القائمة الرئيسية واختيار وضع الدخول (طالب / مشرف) | متاح للجميع |
+| `/id` | 🆔 عرض ونسخ الـ Telegram ID الخاص بالمستخدم | متاح للجميع |
+| `/admin` | 👑 فتح لوحة تحكم المسؤول العام (قناة الأرشيف، حالة النظام) | المسؤول العام فقط 🔒 |
+| `/leaders` | 👥 عرض قائمة الليدرز وتعديل أو سحب صلاحيات الأقسام | المسؤول العام فقط 🔒 |
+| `/promote <ID>` | ➕ ترقية مستخدم إلى رتبة ليدر وتعيين أقسامه مباشرة | المسؤول العام فقط 🔒 |
+| `/demote <ID>` | 🗑️ سحب رتبة الليدر والصلاحيات من مستخدم | المسؤول العام فقط 🔒 |
+
+> **ملاحظة أمنية:** أوامر الإدارة لا تظهر عند كتابة `/` إلا للمسؤول العام فقط، بينما يرى الطلاب الأوامر العامة فقط بفضل تقنية Telegram Scoped Commands.
+
+---
+
+## 📂 هيكل ملفات المشروع (File Structure)
+
+```
+Faculty-Telegram-Bot/
+├── src/
+│   └── index.ts                 # الكود المصدري الرئيسي للوركر والبوت
+├── scripts/
+│   └── set_commands.js          # سكريبت تسجيل أوامر تيليجرام بترميز UTF-8
+├── schema.sql                   # مخطط قاعدة البيانات الأساسي (D1 Schema)
+├── seed_all_departments.sql     # زراعة الأقسام الرئيسية والمقررات لكل الأقسام
+├── seed_cs_term1.sql            # زراعة تصنيفات قسم CS الترم الأول
+├── ADMIN_COMMANDS.md            # الدليل المرجعي الكامل للمشرفين
+├── README.md                    # التوثيق الشامل للمشروع
+├── package.json                 # حزم المشروع والاعتماديات
+├── tsconfig.json                # إعدادات TypeScript
+└── wrangler.toml                # ملف ضبط Cloudflare Workers & D1
+```
+
+---
+
+## 📄 الترخيص (License)
+هذا المشروع مفتوح المصدر ومخصص لخدمة ودعم طلاب كليات الحاسبات والمعلومات.

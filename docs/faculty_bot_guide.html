@@ -1,0 +1,592 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<title>دليل معمارية وتشغيل بوت كلية الحاسبات والمعلومات</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+  @page {
+    size: A4;
+    margin: 12mm 14mm 14mm 14mm;
+    @bottom-center {
+      content: "Faculty Material Telegram Bot — دليل المعمارية والتشغيل السحابي";
+      font-family: 'IBM Plex Sans Arabic', sans-serif;
+      font-size: 8pt;
+      color: #94a3b8;
+    }
+  }
+
+  * {
+    box-sizing: border-box;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  body {
+    font-family: 'IBM Plex Sans Arabic', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    color: #1e293b;
+    line-height: 1.6;
+    font-size: 9.5pt;
+    margin: 0;
+    padding: 0;
+    background: #ffffff;
+  }
+
+  .banner {
+    background: linear-gradient(135deg, #0f172a 0%, #1e3a8a 100%);
+    color: #ffffff;
+    padding: 22px 26px;
+    border-radius: 12px;
+    margin-bottom: 20px;
+    text-align: center;
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+  }
+
+  .banner h1 {
+    font-size: 19pt;
+    font-weight: 700;
+    margin: 0 0 8px 0;
+    letter-spacing: -0.3px;
+    color: #ffffff;
+  }
+
+  .banner p {
+    font-size: 10pt;
+    font-weight: 400;
+    margin: 0;
+    color: #93c5fd;
+    line-height: 1.5;
+  }
+
+  .section-title {
+    display: flex;
+    align-items: center;
+    font-size: 12.5pt;
+    font-weight: 700;
+    color: #0f172a;
+    border-bottom: 2px solid #e2e8f0;
+    padding-bottom: 6px;
+    margin: 18px 0 12px 0;
+  }
+
+  .section-title .icon {
+    margin-left: 8px;
+    font-size: 13pt;
+  }
+
+  p {
+    margin: 0 0 10px 0;
+    color: #334155;
+    text-align: justify;
+  }
+
+  .grid-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-bottom: 14px;
+  }
+
+  .card {
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 12px 14px;
+    margin-bottom: 12px;
+  }
+
+  .card-header {
+    font-weight: 600;
+    color: #1e3a8a;
+    font-size: 10pt;
+    margin-bottom: 6px;
+    display: flex;
+    align-items: center;
+  }
+
+  .card-header .icon {
+    margin-left: 6px;
+  }
+
+  .card p {
+    font-size: 9pt;
+    color: #475569;
+    margin: 0;
+    line-height: 1.5;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    margin: 12px 0 16px 0;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    overflow: hidden;
+    font-size: 9pt;
+  }
+
+  th {
+    background-color: #0f172a;
+    color: #ffffff;
+    font-weight: 600;
+    padding: 9px 12px;
+    text-align: right;
+    border: none;
+  }
+
+  td {
+    padding: 8px 12px;
+    border-top: 1px solid #e2e8f0;
+    border-right: 1px solid #f1f5f9;
+    color: #334155;
+    vertical-align: middle;
+  }
+
+  td:last-child {
+    border-right: none;
+  }
+
+  tr:nth-child(even) td {
+    background-color: #f8fafc;
+  }
+
+  .highlight-box {
+    background: #eff6ff;
+    border-right: 4px solid #3b82f6;
+    border-radius: 6px;
+    padding: 10px 14px;
+    margin: 12px 0;
+    font-size: 9pt;
+    color: #1e40af;
+  }
+
+  .highlight-box strong {
+    color: #1d4ed8;
+  }
+
+  .badge {
+    display: inline-block;
+    padding: 3px 8px;
+    border-radius: 6px;
+    font-size: 8pt;
+    font-weight: 600;
+  }
+
+  .badge-admin { background: #fee2e2; color: #991b1b; }
+  .badge-leader { background: #fef3c7; color: #92400e; }
+  .badge-student { background: #e0e7ff; color: #3730a3; }
+  .badge-tech { background: #f1f5f9; color: #334155; font-family: 'JetBrains Mono', monospace; font-size: 7.5pt; }
+
+  .code-block {
+    background-color: #0f172a;
+    color: #f8fafc;
+    padding: 10px 12px;
+    border-radius: 8px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 7.5pt;
+    direction: ltr;
+    text-align: left;
+    margin: 10px 0;
+    line-height: 1.45;
+    overflow: hidden;
+    border: 1px solid #1e293b;
+  }
+
+  ul, ol {
+    margin: 0 0 10px 0;
+    padding-right: 22px;
+    color: #334155;
+  }
+
+  li {
+    margin-bottom: 5px;
+    text-align: justify;
+  }
+
+  .step-list {
+    list-style: none;
+    padding: 0;
+    margin: 0 0 10px 0;
+  }
+
+  .step-item {
+    display: flex;
+    align-items: flex-start;
+    margin-bottom: 10px;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 9px 12px;
+  }
+
+  .step-number {
+    background: #1e3a8a;
+    color: #ffffff;
+    font-size: 8.5pt;
+    font-weight: 700;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-left: 10px;
+    flex-shrink: 0;
+  }
+
+  .step-content {
+    flex-grow: 1;
+    font-size: 9pt;
+  }
+
+  .step-title {
+    font-weight: 600;
+    color: #0f172a;
+    margin-bottom: 2px;
+  }
+
+  .page-break {
+    page-break-after: always;
+    break-after: page;
+  }
+
+  .footer-bar {
+    margin-top: 14px;
+    padding-top: 6px;
+    border-top: 1px solid #e2e8f0;
+    font-size: 7.5pt;
+    color: #94a3b8;
+    display: flex;
+    justify-content: space-between;
+  }
+</style>
+</head>
+<body>
+
+<!-- ================= PAGE 1 ================= -->
+<div class="banner">
+  <h1>الخطة الهندسية والتشغيلية لبوت كلية الحاسبات والمعلومات</h1>
+  <p>معمارية سحابية مجانية فائقة السرعة على شبكة Cloudflare العالمية مع تحكم كامل لليدرات من تيليجرام</p>
+</div>
+
+<div class="section-title"><span class="icon">⚡</span> 1. المعمارية السحابية: لماذا هذه التركيبة هي الأسرع والأكثر استقراراً؟</div>
+<p>
+تم بناء النظام لخدمة آلاف الطلاب في نفس اللحظة (خصوصاً ليلة الامتحان) بدون أي تأخير في الاستجابة وبدون أي تكلفة استضافة، بالاعتماد على معمارية <strong>Edge Serverless</strong> فائقة الأداء:
+</p>
+
+<table>
+  <thead>
+    <tr>
+      <th style="width: 22%;">المكون التقني</th>
+      <th style="width: 28%;">التقنية المختارة</th>
+      <th style="width: 50%;">الميزات التشغيلية والحدود المجانية</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>منصة التشغيل (Hosting)</strong></td>
+      <td><strong>Cloudflare Workers</strong></td>
+      <td>تعمل بنظام Webhooks بزمن تشغيل 0 مللي ثانية (Zero Cold Start). لا تنام أبداً وتمنح 100,000 طلب يومياً مجاناً بدون الحاجة لفيزا.</td>
+    </tr>
+    <tr>
+      <td><strong>قاعدة البيانات (Database)</strong></td>
+      <td><strong>Cloudflare D1 (SQLite)</strong></td>
+      <td>مدمجة سحابياً بمساحة 5 جيجابايت، تدعم 5 مليون قراءة و 100 ألف كتابة يومياً، وتستجيب للاستعلامات في أقل من 1 مللي ثانية.</td>
+    </tr>
+    <tr>
+      <td><strong>إطار البرمجة (Framework)</strong></td>
+      <td><strong>grammY (TypeScript)</strong></td>
+      <td>أخف وأحدث مكتبة برمجية لـ Telegram API، مصممة خصيصاً للبيئات السحابية فائقة السرعة بدون استهلاك ذاكرة أو معالج.</td>
+    </tr>
+    <tr>
+      <td><strong>تخزين الملفات (Storage)</strong></td>
+      <td><strong>Telegram Servers + Archive</strong></td>
+      <td>تخزين لا نهائي ومجاني للملفات عبر كود <code>file_id</code> وقناة أرشيف خاصة، بدون حجز 1 ميجابايت على السيرفر.</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="highlight-box">
+  <strong>💡 المقارنة مع المنصات التقليدية:</strong> منصات مثل Render و Heroku تدخل في وضع السكون (Sleep Mode) بعد دقائق من عدم الاستخدام وتتأخر 40 ثانية عند فتح البوت. أما ثنائي Cloudflare Workers و D1 فيبقى يقظاً دائماً 24/7 ويستجيب للضغطات في أقل من 50 مللي ثانية.
+</div>
+
+<div class="section-title"><span class="icon">🌳</span> 2. الشجرة الأكاديمية الديناميكية (Hierarchy Tree)</div>
+<p>
+النظام لا يعتمد على أي أسماء ثابتة في الكود (No Hardcoding)، بل يعتمد على شجرة هرمية مرنة قابلة للتوسيع والتعديل بالكامل:
+</p>
+
+<div class="grid-2">
+  <div class="card">
+    <div class="card-header"><span class="icon">🏛️</span> المستوى 1 & 2: الأقسام والترم</div>
+    <p>الأقسام الأربعة الرئيسية (CS, IT, IS, Networks) مع خياري الترم الأول والترم الثاني بتنسيق أزرار عريضة وواضحة.</p>
+  </div>
+  <div class="card">
+    <div class="card-header"><span class="icon">📚</span> المستوى 3: المقررات الدراسية</div>
+    <p>المواد الخاصة بكل قسم وترم (مثل: Compiler, Network Management, Advanced OS, Software Verification, وغيرها).</p>
+  </div>
+  <div class="card">
+    <div class="card-header"><span class="icon">📂</span> المستوى 4: التصنيفات القياسية</div>
+    <p>خانات موحدة لكل مادة: المحاضرات (صف عريض)، السكاشن والعملي، الملخصات، الميدتيرم، وامتحانات الفاينال.</p>
+  </div>
+  <div class="card">
+    <div class="card-header"><span class="icon">📄</span> المستوى 5: المحاضرات والملفات</div>
+    <p>المجلدات الفرعية للمحاضرات والسكاشن المرتبة تصاعدياً مع إمكانية استلام الملفات بنقرة زر واحدة.</p>
+  </div>
+</div>
+
+<div class="footer-bar">
+  <span>Faculty Material Telegram Bot — دليل المعمارية والتشغيل السحابي</span>
+  <span>صفحة 1 من 4</span>
+</div>
+
+<div class="page-break"></div>
+
+<!-- ================= PAGE 2 ================= -->
+
+<div class="section-title"><span class="icon">👥</span> 3. تجربة المستخدمين ونظام الصلاحيات المخصص (RBAC)</div>
+<p>
+تم بناء نظام أمان متقدم متعدد المستويات (Role-Based Access Control) لحماية المحتوى وتوزيع المهام بدقة بين الطلاب والليدرز:
+</p>
+
+<table>
+  <thead>
+    <tr>
+      <th style="width: 20%;">نوع المستخدم</th>
+      <th style="width: 32%;">الأزرار المعروضة على الشاشة</th>
+      <th style="width: 48%;">الصلاحيات والوظائف المتاحة</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><span class="badge badge-student">طالب (Student)</span></td>
+      <td>أزرار الأقسام والمواد فقط + أزرار التنقل السريع.</td>
+      <td>تصفح المواد واستلام الملفات فوراً دون أي أزرار تحكم أو إعلانات مشوشة.</td>
+    </tr>
+    <tr>
+      <td><span class="badge badge-leader">ليدر قسم (Leader)</span></td>
+      <td>أزرار الطالب + شريط الإدارة في أسفل القائمة: <code>[📤 رفع ملفات]</code>, <code>[➕ إضافة خانة]</code>, <code>[✏️ تعديل]</code>, <code>[🗑️ حذف]</code>.</td>
+      <td>إدارة كاملة (رفع، تعديل، حذف) <strong>داخل الأقسام المخصصة له فقط (مثل CS فقط)</strong>، ويعامله البوت كطالب عادي خارجها.</td>
+    </tr>
+    <tr>
+      <td><span class="badge badge-admin">المسؤول العام (Super Admin)</span></td>
+      <td>كافة أزرار التحكم في جميع الأقسام + أوامر الإدارة الحصرية: <code>/admin</code> و <code>/leaders</code>.</td>
+      <td>تحكم شامل في كل أقسام الكلية، تعيين الليدرز وتحديد أقسامهم بضغطة زر، وإدارة قناة الأرشيف والتنسيق العام.</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="section-title"><span class="icon">✨</span> 4. الميزات الإضافية المتقدمة التي تم تطويرها في المشروع</div>
+<p>
+خلال مرحلة التطوير، تمت إضافة مجموعة من الميزات النوعية لضمان أفضل سرعة وسلاسة في الاستخدام:
+</p>
+
+<div class="grid-2">
+  <div class="card">
+    <div class="card-header"><span class="icon">🎓</span> وضع الدخول المزدوج (Dual Mode)</div>
+    <p>إمكانية انتقال المشرف بضغطة زر بين <strong>وضع الطالب</strong> (لرؤية النتيجة النهائية النظيفة) و<strong>وضع المشرف</strong> لإظهار أدوات التحكم.</p>
+  </div>
+  <div class="card">
+    <div class="card-header"><span class="icon">⚡</span> الحذف الفوري المتعدد (Multi-Delete)</div>
+    <p>إمكانية حذف عدة ملفات متتالية دون انغلاق القائمة، مع حذف الملف من قناة الأرشيف ومن قاعدة البيانات في أجزاء من الثانية.</p>
+  </div>
+  <div class="card">
+    <div class="card-header"><span class="icon">🤫</span> الرفع الجماعي الصامت (Silent Upload)</div>
+    <p>إرسال أو تحويل عشرات الملفات والصور دفعة واحدة دون رسائل تشويش متكررة، مع تأكيد الحفظ بنقرة واحدة عند الانتهاء.</p>
+  </div>
+  <div class="card">
+    <div class="card-header"><span class="icon">📦</span> تحميل المادة بالكامل (Download All)</div>
+    <p>زر تجميع ذكي <code>[📦 عرض وتحميل كل المحتوى]</code> يجمع ويرسل كل محاضرات وسكاشن المادة مصنفة دفعة واحدة.</p>
+  </div>
+  <div class="card">
+    <div class="card-header"><span class="icon">🎯</span> التسليم الذكي للملفات (Leaf Delivery)</div>
+    <p>عند ضغط الطالب على محاضرة نهائية، ترسل الملفات فوراً مع إبقاء أزرار المحاضرات متاحة للتنقل دون فتح صفحات فارغة.</p>
+  </div>
+  <div class="card">
+    <div class="card-header"><span class="icon">📐</span> تخصيص العرض والصفوف (Layout Control)</div>
+    <p>التحكم في عرض كل زر (صف عريض 🔘 ↔️ صف مزدوج 👥) مع زر تعميم التنسيق على باقي المواد لتنظيم الواجهة.</p>
+  </div>
+</div>
+
+<div class="footer-bar">
+  <span>Faculty Material Telegram Bot — دليل المعمارية والتشغيل السحابي</span>
+  <span>صفحة 2 من 4</span>
+</div>
+
+<div class="page-break"></div>
+
+<!-- ================= PAGE 3 ================= -->
+
+<div class="section-title"><span class="icon">🗄️</span> 5. التصميم الهندسي لقاعدة البيانات (D1 SQL Schema)</div>
+<p>
+مخطط قاعدة بيانات سحابية متكاملة وسريعة تعتمد على محرك SQLite المدمج داخل شبكة Cloudflare:
+</p>
+
+<div class="code-block">
+-- 1. جدول المستخدمين والصلاحيات
+CREATE TABLE users (
+  telegram_id INTEGER PRIMARY KEY,
+  full_name TEXT,
+  role TEXT DEFAULT 'student',            -- 'student' | 'leader' | 'super_admin'
+  managed_node_id INTEGER DEFAULT NULL,
+  current_node_id INTEGER DEFAULT NULL,  -- معرف المجلد الحالي للرجوع السلس
+  bot_state TEXT DEFAULT 'browsing',     -- حالة المحادثة
+  view_mode TEXT DEFAULT 'admin'         -- 'admin' | 'student'
+);
+
+-- 2. الشجرة الهرمية للأقسام والمواد
+CREATE TABLE nodes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  parent_id INTEGER DEFAULT NULL,        -- معرف المجلد الأب (NULL للأقسام الرئيسية)
+  title TEXT NOT NULL,                   -- نص الزر
+  sort_order INTEGER DEFAULT 0,          -- ترتيب العرض التصاعدي
+  created_by INTEGER,
+  is_full_width INTEGER DEFAULT 0,       -- 1: صف عريض منفرد | 0: صف مزدوج
+  FOREIGN KEY (parent_id) REFERENCES nodes(id) ON DELETE CASCADE
+);
+
+-- 3. المحتوى والملفات الأكاديمية المرفوعة
+CREATE TABLE materials (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  node_id INTEGER NOT NULL,              -- معرف المجلد التابع له
+  file_name TEXT NOT NULL,               -- اسم الملف الأصلي
+  telegram_file_id TEXT NOT NULL,        -- معرّف تيليجرام الدائم
+  file_type TEXT NOT NULL,               -- 'document' | 'video' | 'photo' | 'audio'
+  caption TEXT DEFAULT NULL,
+  uploaded_by INTEGER,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  backup_message_id INTEGER DEFAULT NULL,-- معرّف الرسالة بقناة الأرشيف للحذف التلقائي
+  FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE
+);
+
+-- 4. تخصيص صلاحيات الأقسام لليدرز (RBAC)
+CREATE TABLE user_permissions (
+  telegram_id INTEGER NOT NULL,
+  node_id INTEGER NOT NULL,              -- معرف القسم المصرح به
+  PRIMARY KEY (telegram_id, node_id)
+);
+
+CREATE INDEX idx_nodes_parent ON nodes(parent_id);
+CREATE INDEX idx_materials_node ON materials(node_id);
+</div>
+
+<div class="section-title"><span class="icon">🚀</span> 6. خطوات التثبيت والتشغيل السحابي خطوة بخطوة</div>
+
+<ul class="step-list">
+  <li class="step-item">
+    <div class="step-number">1</div>
+    <div class="step-content">
+      <div class="step-title">إنشاء البوت وقناة الأرشيف على تليجرام</div>
+      من خلال <code>@BotFather</code> أنشئ البوت واحصل على <strong>Bot Token</strong>، ثم أنشئ قناة خاصة بعنوان "أرشيف ملفات البوت" وأضف البوت بداخلها كمسؤول بصلاحية النشر والحذف.
+    </div>
+  </li>
+  <li class="step-item">
+    <div class="step-number">2</div>
+    <div class="step-content">
+      <div class="step-title">تجهيز بيئة Cloudflare D1</div>
+      قم بتسجيل الدخول بأمر <code>npx wrangler login</code>، ثم أنشئ قاعدة البيانات بأمر <code>npx wrangler d1 create college_bot_db</code> وضع الـ <code>database_id</code> الناتج في ملف <code>wrangler.toml</code>.
+    </div>
+  </li>
+  <li class="step-item">
+    <div class="step-number">3</div>
+    <div class="step-content">
+      <div class="step-title">تنفيذ الجداول وبذور البيانات الأكاديمية (Seeds)</div>
+      نفّذ أوامر تهيئة الجداول وبذور الأقسام والمقررات مباشرة:
+      <code>npx wrangler d1 execute college_bot_db --remote --file=./schema.sql</code>
+    </div>
+  </li>
+</ul>
+
+<div class="footer-bar">
+  <span>Faculty Material Telegram Bot — دليل المعمارية والتشغيل السحابي</span>
+  <span>صفحة 3 من 4</span>
+</div>
+
+<div class="page-break"></div>
+
+<!-- ================= PAGE 4 ================= -->
+
+<ul class="step-list" style="margin-top: 5px;">
+  <li class="step-item">
+    <div class="step-number">4</div>
+    <div class="step-content">
+      <div class="step-title">حفظ التوكن السري والنشر السحابي (Deployment)</div>
+      احفظ التوكن في كلاودفلير عبر <code>npx wrangler secret put BOT_TOKEN</code> ثم انشر المشروع السحابي في ثوانٍ عبر <code>npx wrangler deploy</code>.
+    </div>
+  </li>
+  <li class="step-item">
+    <div class="step-number">5</div>
+    <div class="step-content">
+      <div class="step-title">تفعيل الـ Webhook وربط تيليجرام</div>
+      افتح الرابط التالي في المتصفح مرة واحدة لتوجيه رسائل البوت إلى الـ Worker:<br>
+      <code>https://api.telegram.org/bot&lt;TOKEN&gt;/setWebhook?url=https://faculty-telegram-bot.&lt;subdomain&gt;.workers.dev</code>
+    </div>
+  </li>
+  <li class="step-item">
+    <div class="step-number">6</div>
+    <div class="step-content">
+      <div class="step-title">تسجيل الأوامر المخصصة في تيليجرام (UTF-8)</div>
+      شغّل السكريبت المحلي <code>node scripts/set_commands.js</code> لتسجيل قائمة الأوامر المخصصة في تيليجرام بالعربي والإيموجي لضمان ظهور أوامر الإدارة للمسؤول العام فقط.
+    </div>
+  </li>
+</ul>
+
+<div class="section-title"><span class="icon">📋</span> 7. الدليل المرجعي للأوامر (Command Reference)</div>
+<p>
+تم تخصيص الأوامر في تيليجرام بحيث لا تظهر أوامر الإدارة إلا للمسؤول العام فقط عند كتابة <code>/</code>:
+</p>
+
+<table>
+  <thead>
+    <tr>
+      <th style="width: 22%;">الأمر</th>
+      <th style="width: 50%;">الوصف والوظيفة</th>
+      <th style="width: 28%;">الصلاحية</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>/start</code></td>
+      <td>فتح القائمة الرئيسية وتبديل الوضع (طالب 🎓 / مشرف ⚙️).</td>
+      <td><span class="badge badge-student">متاح للجميع</span></td>
+    </tr>
+    <tr>
+      <td><code>/id</code></td>
+      <td>معرفة الـ Telegram ID الخاص بالحساب ونسخه بلمسة واحدة.</td>
+      <td><span class="badge badge-student">متاح للجميع</span></td>
+    </tr>
+    <tr>
+      <td><code>/admin</code></td>
+      <td>لوحة تحكم المسؤول العام (قناة الأرشيف، حالة النظام، إدارة الليدرز).</td>
+      <td><span class="badge badge-admin">المسؤول العام فقط 🔒</span></td>
+    </tr>
+    <tr>
+      <td><code>/leaders</code></td>
+      <td>عرض وتعديل صلاحيات الليدرز الممنوحة لكل قسم بضغطة زر.</td>
+      <td><span class="badge badge-admin">المسؤول العام فقط 🔒</span></td>
+    </tr>
+    <tr>
+      <td><code>/promote &lt;ID&gt;</code></td>
+      <td>ترقية مستخدم إلى رتبة ليدر وتعيين أقسامه المخصصة فوراً.</td>
+      <td><span class="badge badge-admin">المسؤول العام فقط 🔒</span></td>
+    </tr>
+    <tr>
+      <td><code>/demote &lt;ID&gt;</code></td>
+      <td>سحب رتبة الليدر وحذف كافة صلاحيات الأقسام من المستخدم.</td>
+      <td><span class="badge badge-admin">المسؤول العام فقط 🔒</span></td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="highlight-box">
+  <strong>💡 ميزة التحويل المباشر:</strong> لتعيين أي ليدر جديد دون كتابة الـ ID الخاص به، يمكنك فقط الضغط على زر <code>[➕ تعيين ليدر جديد]</code> في البوت وعمل <strong>Forward (تحويل)</strong> لأي رسالة منه للبوت مباشرة، وسيقوم البوت باستخراج بياناته وترقيته فوراً.
+</div>
+
+<div class="footer-bar">
+  <span>Faculty Material Telegram Bot — دليل المعمارية والتشغيل السحابي</span>
+  <span>صفحة 4 من 4</span>
+</div>
+
+</body>
+</html>

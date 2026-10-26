@@ -1,0 +1,7 @@
+node_modules/
+.wrangler/
+temp_downloads/
+*.log
+.env
+.dev.vars
+docs/page_*.png

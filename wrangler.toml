@@ -1,0 +1,13 @@
+name = "faculty-telegram-bot"
+main = "src/index.ts"
+compatibility_date = "2024-10-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+SUPER_ADMIN_ID = "1143997176"
+BACKUP_CHANNEL_ID = "-1004303892625"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "college_bot_db"
+database_id = "09093760-0892-4a19-87e6-4e5351e4c474"
