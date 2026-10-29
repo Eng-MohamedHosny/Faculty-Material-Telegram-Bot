@@ -27,7 +27,10 @@ interface UserRow {
     | "awaiting_submission_folder"
     | "awaiting_task_title"
     | "awaiting_task_days"
-    | "awaiting_task_attachment";
+    | "awaiting_task_attachment"
+    | "awaiting_edit_task_title"
+    | "awaiting_edit_task_days"
+    | "awaiting_edit_task_file";
   subscribed_dept_id: number | null;
   notifications_enabled: number;
   pending_target_id: number | null;
@@ -626,30 +629,48 @@ export default {
       }
     }
 
-    async function renderWeeklyTasks(ctx: any, user: UserRow) {
-      if (!user.subscribed_dept_id) {
+    async function renderWeeklyTasks(ctx: any, user: UserRow, targetDeptId?: number) {
+      const deptId = targetDeptId || user.subscribed_dept_id;
+      if (!deptId) {
         return renderDepartmentOnboarding(ctx, false);
       }
 
       const deptNode = await env.DB.prepare("SELECT title FROM nodes WHERE id = ?")
-        .bind(user.subscribed_dept_id)
+        .bind(deptId)
         .first<{ title: string }>();
+
+      const isManager = await canManage(user, deptId);
 
       const { results: tasks } = await env.DB.prepare(
         `SELECT * FROM weekly_tasks 
          WHERE dept_node_id = ? AND due_date >= datetime('now') 
          ORDER BY due_date ASC`
       )
-        .bind(user.subscribed_dept_id)
+        .bind(deptId)
         .all<WeeklyTaskRow>();
 
       if (!tasks || tasks.length === 0) {
-        return ctx.reply(
-          `🎉 **لا توجد تسليمات أو تاسكات مطلوبة حالياً!**\n\n` +
-            `• القسم: **${deptNode?.title || "قسمك الأكاديمي"}**\n` +
-            `استمتع بوقتك وراجع محاضراتك أولاً بأول! 🚀`,
-          { parse_mode: "Markdown" }
-        );
+        const emptyKb = new InlineKeyboard();
+        if (isManager) {
+          emptyKb.text("⚙️ إدارة التاسكات السابقة", `manage_tasks_${deptId}`).row();
+        }
+        emptyKb.text("❌ إغلاق", "close_tasks");
+
+        const emptyMsg =
+          `🎉 **لا توجد تسليمات أو تاسكات نشطة حالياً!**\n\n` +
+          `• القسم: **${deptNode?.title || "قسمك الأكاديمي"}**\n` +
+          `استمتع بوقتك وراجع محاضراتك أولاً بأول! 🚀`;
+
+        if (ctx.callbackQuery) {
+          try {
+            await ctx.editMessageText(emptyMsg, { parse_mode: "Markdown", reply_markup: emptyKb });
+          } catch {
+            await ctx.reply(emptyMsg, { parse_mode: "Markdown", reply_markup: emptyKb });
+          }
+        } else {
+          await ctx.reply(emptyMsg, { parse_mode: "Markdown", reply_markup: emptyKb });
+        }
+        return;
       }
 
       const inlineKeyboard = new InlineKeyboard();
@@ -671,9 +692,107 @@ export default {
         }
       });
 
+      if (isManager) {
+        inlineKeyboard.text("⚙️ تعديل أو حذف تاسك", `manage_tasks_${deptId}`).row();
+      }
+
       inlineKeyboard.text("❌ إغلاق", "close_tasks");
 
-      await ctx.reply(message, { parse_mode: "Markdown", reply_markup: inlineKeyboard });
+      if (ctx.callbackQuery) {
+        try {
+          await ctx.editMessageText(message, { parse_mode: "Markdown", reply_markup: inlineKeyboard });
+        } catch {
+          await ctx.reply(message, { parse_mode: "Markdown", reply_markup: inlineKeyboard });
+        }
+      } else {
+        await ctx.reply(message, { parse_mode: "Markdown", reply_markup: inlineKeyboard });
+      }
+    }
+
+    async function renderTaskManagementList(ctx: any, deptId: number, user: UserRow) {
+      if (!(await canManage(user, deptId))) {
+        await ctx.answerCallbackQuery({ text: "❌ لا تملك الصلاحية لإدارة تاسكات هذا القسم", show_alert: true });
+        return;
+      }
+
+      const deptNode = await env.DB.prepare("SELECT title FROM nodes WHERE id = ?").bind(deptId).first<{ title: string }>();
+      const { results: tasks } = await env.DB.prepare(
+        "SELECT * FROM weekly_tasks WHERE dept_node_id = ? ORDER BY due_date ASC"
+      ).bind(deptId).all<WeeklyTaskRow>();
+
+      const kb = new InlineKeyboard();
+      if (!tasks || tasks.length === 0) {
+        kb.text("⬅️ رجوع لقائمة التاسكات", `back_to_tasks_${deptId}`).row();
+        const emptyMsg = `⚙️ **إدارة التاسكات — [${deptNode?.title}]:**\n\nلا توجد تاسكات مسجلة حالياً في هذا القسم.`;
+        if (ctx.callbackQuery) {
+          await ctx.editMessageText(emptyMsg, { parse_mode: "Markdown", reply_markup: kb });
+        } else {
+          await ctx.reply(emptyMsg, { parse_mode: "Markdown", reply_markup: kb });
+        }
+        return;
+      }
+
+      let text = `⚙️ **لوحة إدارة وتعديل التاسكات — [${deptNode?.title}]:**\n\nاضغط على أي تاسك لتعديل عنوانه، موعده (Deadline)، ملفه المرفق، أو حذفه بالكامل 👇\n\n`;
+      tasks.forEach((t, i) => {
+        text += `${i + 1}️⃣ **${t.course_title}:** ${t.task_title}\n⏰ الموعد: \`${t.due_date}\`\n\n`;
+        kb.text(`✏️ تعديل / 🗑️ حذف: ${t.course_title}`, `task_menu_${t.id}`).row();
+      });
+
+      kb.text("⬅️ رجوع لقائمة التاسكات", `back_to_tasks_${deptId}`).row();
+      kb.text("❌ إغلاق", "close_tasks");
+
+      if (ctx.callbackQuery) {
+        await ctx.editMessageText(text, { parse_mode: "Markdown", reply_markup: kb });
+      } else {
+        await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb });
+      }
+    }
+
+    async function renderSingleTaskEditor(ctx: any, taskId: number, user: UserRow) {
+      const task = await env.DB.prepare("SELECT * FROM weekly_tasks WHERE id = ?").bind(taskId).first<WeeklyTaskRow>();
+      if (!task) {
+        if (ctx.callbackQuery) {
+          await ctx.answerCallbackQuery({ text: "التاسك غير موجود أو تم حذفه", show_alert: true });
+        }
+        return;
+      }
+
+      if (!(await canManage(user, task.dept_node_id))) {
+        if (ctx.callbackQuery) {
+          await ctx.answerCallbackQuery({ text: "❌ لا تملك الصلاحية", show_alert: true });
+        }
+        return;
+      }
+
+      const hasFile = Boolean(task.attachment_file_id);
+      const kb = new InlineKeyboard()
+        .text("📝 تعديل عنوان التكليف", `edit_t_title_${taskId}`)
+        .row()
+        .text("⏰ تعديل موعد التسليم (الـ Deadline)", `edit_t_days_${taskId}`)
+        .row()
+        .text(hasFile ? "📎 تغيير ملف التكليف" : "📎 إضافة ملف للتكليف", `edit_t_file_${taskId}`)
+        .row();
+
+      if (hasFile) {
+        kb.text("❌ إزالة الملف المرفق فقط", `remove_t_file_${taskId}`).row();
+      }
+
+      kb.text("🗑️ حذف هذا التاسك بالكامل", `del_t_prompt_${taskId}`).row();
+      kb.text("⬅️ رجوع لقائمة الإدارة", `manage_tasks_${task.dept_node_id}`).row();
+
+      const text =
+        `⚙️ **خيارات تعديل التاسك:**\n\n` +
+        `• المادة: **${task.course_title}**\n` +
+        `• التكليف: **${task.task_title}**\n` +
+        `• الموعد النهائي: \`${task.due_date}\`\n` +
+        `• الملف المرفق: ${hasFile ? "موجود ✅" : "لا يوجد ❌"}\n\n` +
+        `اختر الإجراء الذي تريد تطبيقه بالأسفل 👇`;
+
+      if (ctx.callbackQuery) {
+        await ctx.editMessageText(text, { parse_mode: "Markdown", reply_markup: kb });
+      } else {
+        await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb });
+      }
     }
 
     async function renderStats(ctx: any, user: UserRow) {
@@ -1808,6 +1927,79 @@ export default {
         return;
       }
 
+      // State: AWAITING EDIT TASK TITLE
+      if (user.bot_state === "awaiting_edit_task_title") {
+        const taskId = user.pending_target_id;
+        if (!taskId || !text || isReservedButton(text)) {
+          return ctx.reply("⚠️ يرجى إرسال عنوان واضح وصالح للتاسك، أو اضغط [❌ إلغاء].");
+        }
+
+        await env.DB.prepare("UPDATE weekly_tasks SET task_title = ? WHERE id = ?")
+          .bind(text, taskId)
+          .run();
+
+        await updateUserState(user.telegram_id, "browsing", user.current_node_id, null, null);
+        user.bot_state = "browsing";
+        user.pending_target_id = null;
+
+        await ctx.reply(`✅ تم تعديل عنوان التاسك بنجاح إلى:\n**${text}**`, { parse_mode: "Markdown" });
+        await renderSingleTaskEditor(ctx, taskId, user);
+        return;
+      }
+
+      // State: AWAITING EDIT TASK DAYS
+      if (user.bot_state === "awaiting_edit_task_days") {
+        const taskId = user.pending_target_id;
+        const days = text ? parseInt(text, 10) : NaN;
+        if (!taskId || isNaN(days) || days <= 0 || days > 60) {
+          return ctx.reply("⚠️ يرجى إرسال عدد الأيام المتبقية للتسليم كرقم صحيح (بين 1 و 60 يوماً)، أو اضغط [❌ إلغاء].");
+        }
+
+        const due = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+        const dueDateStr = due.toISOString().replace("T", " ").substring(0, 19);
+
+        await env.DB.prepare("UPDATE weekly_tasks SET due_date = ? WHERE id = ?")
+          .bind(dueDateStr, taskId)
+          .run();
+
+        await updateUserState(user.telegram_id, "browsing", user.current_node_id, null, null);
+        user.bot_state = "browsing";
+        user.pending_target_id = null;
+
+        await ctx.reply(`✅ تم تعديل موعد التسليم النهائي بنجاح ليصبح بعد **${days}** أيام:\n\`${dueDateStr}\``, { parse_mode: "Markdown" });
+        await renderSingleTaskEditor(ctx, taskId, user);
+        return;
+      }
+
+      // State: AWAITING EDIT TASK FILE
+      if (user.bot_state === "awaiting_edit_task_file") {
+        const taskId = user.pending_target_id;
+        let attachmentId: string | null = null;
+
+        if (ctx.message.document) {
+          attachmentId = ctx.message.document.file_id;
+        } else if (ctx.message.photo) {
+          const highestPhoto = ctx.message.photo[ctx.message.photo.length - 1];
+          attachmentId = highestPhoto.file_id;
+        }
+
+        if (!taskId || !attachmentId) {
+          return ctx.reply("⚠️ يرجى إرسال ملف PDF أو صورة لتحديث ملف التكليف، أو اضغط [❌ إلغاء].");
+        }
+
+        await env.DB.prepare("UPDATE weekly_tasks SET attachment_file_id = ? WHERE id = ?")
+          .bind(attachmentId, taskId)
+          .run();
+
+        await updateUserState(user.telegram_id, "browsing", user.current_node_id, null, null);
+        user.bot_state = "browsing";
+        user.pending_target_id = null;
+
+        await ctx.reply("✅ تم تحديث ملف التكليف بنجاح!", { parse_mode: "Markdown" });
+        await renderSingleTaskEditor(ctx, taskId, user);
+        return;
+      }
+
       // State: UPLOADING
       if (user.bot_state === "uploading") {
         if (text === "✅ إنهاء الحفظ" || text === "إنهاء الحفظ") {
@@ -2291,6 +2483,122 @@ export default {
         await ctx.replyWithDocument(task.attachment_file_id, {
           caption: `📄 **ملف تكليف:** ${task.task_title}\n📌 مادة: ${task.course_title}`,
         });
+        return;
+      }
+
+      // Manage Weekly Tasks list for Department
+      if (data.startsWith("manage_tasks_")) {
+        const deptId = parseInt(data.replace("manage_tasks_", ""), 10);
+        await ctx.answerCallbackQuery();
+        await renderTaskManagementList(ctx, deptId, user);
+        return;
+      }
+
+      // Back to Weekly Tasks list
+      if (data.startsWith("back_to_tasks_")) {
+        const deptId = parseInt(data.replace("back_to_tasks_", ""), 10);
+        await ctx.answerCallbackQuery();
+        await renderWeeklyTasks(ctx, user, deptId);
+        return;
+      }
+
+      // Single Task Management Menu
+      if (data.startsWith("task_menu_")) {
+        const taskId = parseInt(data.replace("task_menu_", ""), 10);
+        await ctx.answerCallbackQuery();
+        await renderSingleTaskEditor(ctx, taskId, user);
+        return;
+      }
+
+      // Edit Task Title Prompt
+      if (data.startsWith("edit_t_title_")) {
+        const taskId = parseInt(data.replace("edit_t_title_", ""), 10);
+        await updateUserState(user.telegram_id, "awaiting_edit_task_title", user.current_node_id, null, taskId);
+        user.bot_state = "awaiting_edit_task_title";
+        user.pending_target_id = taskId;
+        await ctx.deleteMessage().catch(() => {});
+        const cancelKeyboard = new Keyboard().text("❌ إلغاء").resized();
+        await ctx.reply("✍️ **أرسل الآن العنوان الجديد للتاسك/التكليف:**\n(أو اضغط [❌ إلغاء])", {
+          parse_mode: "Markdown",
+          reply_markup: cancelKeyboard,
+        });
+        return;
+      }
+
+      // Edit Task Days Prompt
+      if (data.startsWith("edit_t_days_")) {
+        const taskId = parseInt(data.replace("edit_t_days_", ""), 10);
+        await updateUserState(user.telegram_id, "awaiting_edit_task_days", user.current_node_id, null, taskId);
+        user.bot_state = "awaiting_edit_task_days";
+        user.pending_target_id = taskId;
+        await ctx.deleteMessage().catch(() => {});
+        const cancelKeyboard = new Keyboard().text("❌ إلغاء").resized();
+        await ctx.reply(
+          `⏰ **كم يوماً متبقياً للتسليم من الآن؟**\n\nأرسل رقماً صحيحاً (مثال: "3" لـ 3 أيام، أو "7" لأسبوع):\n(أو اضغط [❌ إلغاء])`,
+          { parse_mode: "Markdown", reply_markup: cancelKeyboard }
+        );
+        return;
+      }
+
+      // Edit Task File Prompt
+      if (data.startsWith("edit_t_file_")) {
+        const taskId = parseInt(data.replace("edit_t_file_", ""), 10);
+        await updateUserState(user.telegram_id, "awaiting_edit_task_file", user.current_node_id, null, taskId);
+        user.bot_state = "awaiting_edit_task_file";
+        user.pending_target_id = taskId;
+        await ctx.deleteMessage().catch(() => {});
+        const cancelKeyboard = new Keyboard().text("❌ إلغاء").resized();
+        await ctx.reply("📎 **أرسل الآن ملف الـ PDF أو الصورة الجديدة الخاصة بالتكليف:**\n(أو اضغط [❌ إلغاء])", {
+          parse_mode: "Markdown",
+          reply_markup: cancelKeyboard,
+        });
+        return;
+      }
+
+      // Remove Task File Attachment
+      if (data.startsWith("remove_t_file_")) {
+        const taskId = parseInt(data.replace("remove_t_file_", ""), 10);
+        await env.DB.prepare("UPDATE weekly_tasks SET attachment_file_id = NULL WHERE id = ?").bind(taskId).run();
+        await ctx.answerCallbackQuery({ text: "✅ تم حذف الملف المرفق من التاسك." });
+        await renderSingleTaskEditor(ctx, taskId, user);
+        return;
+      }
+
+      // Delete Task Prompt Confirmation
+      if (data.startsWith("del_t_prompt_")) {
+        const taskId = parseInt(data.replace("del_t_prompt_", ""), 10);
+        const task = await env.DB.prepare("SELECT * FROM weekly_tasks WHERE id = ?").bind(taskId).first<WeeklyTaskRow>();
+        if (!task) {
+          await ctx.answerCallbackQuery({ text: "التاسك غير موجود", show_alert: true });
+          return;
+        }
+
+        const kb = new InlineKeyboard()
+          .text("🗑️ نعم، تأكيد الحذف نهائياً", `del_t_confirm_${taskId}`)
+          .row()
+          .text("❌ تراجع وإلغاء", `task_menu_${taskId}`);
+
+        await ctx.editMessageText(
+          `⚠️ **هل أنت متأكد من حذف هذا التاسك نهائياً؟**\n\n` +
+            `• المادة: **${task.course_title}**\n` +
+            `• التكليف: **${task.task_title}**\n\n` +
+            `لا يمكن التراجع عن الحذف بعد التأكيد.`,
+          { parse_mode: "Markdown", reply_markup: kb }
+        );
+        return;
+      }
+
+      // Delete Task Confirmed
+      if (data.startsWith("del_t_confirm_")) {
+        const taskId = parseInt(data.replace("del_t_confirm_", ""), 10);
+        const task = await env.DB.prepare("SELECT dept_node_id FROM weekly_tasks WHERE id = ?").bind(taskId).first<{ dept_node_id: number }>();
+        await env.DB.prepare("DELETE FROM weekly_tasks WHERE id = ?").bind(taskId).run();
+        await ctx.answerCallbackQuery({ text: "🗑️ تم حذف التاسك بنجاح!" });
+        if (task) {
+          await renderTaskManagementList(ctx, task.dept_node_id, user);
+        } else {
+          await ctx.deleteMessage().catch(() => {});
+        }
         return;
       }
 
