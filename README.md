@@ -54,6 +54,25 @@ Engineered on an **Edge Serverless Architecture** (Cloudflare Workers + D1 SQLit
 - **In-Chat Leader Broadcast:** Department leaders have a `📢 إرسال إشعار للقسم` button inside their assigned department folders to compose and blast announcements, texts, images, or PDFs to all enrolled students.
 - **1-Click Post-Upload Notification:** Upon completing a batch upload session (`[✅ إنهاء الحفظ]`), leaders receive a 1-click prompt `[🔔 إرسال تنبيه لطلاب القسم بالملفات الجديدة]` to notify department students of the newly published materials.
 
+### 7. Crowdsourced Student Notes with Silent Moderation (v2.1)
+- **Student Contribution Flow:** Inside any course menu, students see a `[📝 ساهم بملخص أو امتحان]` button to submit PDFs, summaries, or past exams. Upon submission, the student receives instant gratitude (`❤️ شكراً لمساهمتك الجميلة!`).
+- **Silent Leader Moderation:** The contribution is delivered directly to course leaders with moderation buttons: `[✅ قبول واختيار الفولدر]` and `[🗑️ تجاهل وحذف بصمت]`.
+- **Zero-Embarrassment Rejection:** If ignored, the submission card disappears silently and the record is marked `ignored` without notifying the student.
+- **Dynamic Placement or New Folder Creation:** Leaders can place approved notes into existing folders (e.g. Lectures, Summaries) or create a new custom folder on the fly.
+
+### 8. Weekly Tasks & Automatic Deadlines Clearing (v2.1)
+- **Student Dashboard:** Root menu button `[📅 تاسكات وتسليمات الأسبوع الحالي]` or `/tasks` presents a prioritized card list of upcoming sheets, assignments, and quizzes due within 7 days.
+- **1-Click Sheet Downloader:** Each task includes an inline button to download the attached assignment sheet directly.
+- **Automatic Expiration Cleaning:** Using SQLite `due_date >= datetime('now')`, completed deadlines automatically disappear without manual leader intervention.
+- **Leader Task Publishing:** Leaders can create new tasks with title, deadline days, and optional PDF/photo attachment in seconds.
+
+### 9. Dual Analytics Dashboard (Super Admin vs. Leader) (v2.1)
+- **Super Admin Overview:** Command `/stats` or button in `/admin` displays college-wide user metrics, notification adoption rates, per-department student and material counts, and an automatic gap detector highlighting empty courses that have zero materials.
+- **Scoped Leader Stats:** Leaders view department-specific metrics: subscribed student count, active tasks, and count of pending student submissions awaiting review.
+
+### 10. Robust Input Validation & State Machine Guards (v2.1)
+- 3-tier defense preventing accidental folder renaming to navigation keywords (e.g., "رجوع") and preventing sibling name duplication at the same tree level.
+
 ---
 
 ## 🏗️ System Architecture
@@ -72,6 +91,8 @@ Engineered on an **Edge Serverless Architecture** (Cloudflare Workers + D1 SQLit
                      |  - Role-Based Access Control (RBAC)   |
                      |  - Instant Optimistic UI Handlers     |
                      |  - Scheduled Broadcast Queue Worker   |
+                     |  - Crowdsource Moderation Flow        |
+                     |  - Tasks Deadlines Auto-Cleaner       |
                      +---------+-------------------+---------+
                                |                   |
             Fast SQL Queries   |                   | Telegram API Calls
@@ -82,8 +103,10 @@ Engineered on an **Edge Serverless Architecture** (Cloudflare Workers + D1 SQLit
             | - users              |     | - Backup Archive Channel   |
             | - nodes              |     | - Batch Media Grouping     |
             | - materials          |     | - Safe copyMessage Queue   |
-            | - user_permissions   |     +----------------------------+
-            | - broadcast_jobs     |
+            | - user_permissions   |     | - Student Submissions      |
+            | - broadcast_jobs     |     +----------------------------+
+            | - submissions        |
+            | - weekly_tasks       |
             | - settings           |
             +----------------------+
 ```
@@ -100,10 +123,11 @@ CREATE TABLE users (
   role TEXT DEFAULT 'student',            -- 'student' | 'leader' | 'super_admin'
   managed_node_id INTEGER DEFAULT NULL,
   current_node_id INTEGER DEFAULT NULL,  -- Current folder ID for accurate Back navigation
-  bot_state TEXT DEFAULT 'browsing',     -- 'browsing' | 'uploading' | 'renaming' | 'awaiting_folder' | 'awaiting_leader_id' | 'awaiting_broadcast'
+  bot_state TEXT DEFAULT 'browsing',     -- 'browsing' | 'uploading' | 'renaming' | 'awaiting_folder' | 'awaiting_leader_id' | 'awaiting_broadcast' | 'awaiting_admin_broadcast' | 'awaiting_submission' | 'awaiting_task_title'
   view_mode TEXT DEFAULT 'admin',        -- 'admin' | 'student'
   subscribed_dept_id INTEGER DEFAULT NULL,-- Subscribed root department ID for notifications
-  notifications_enabled INTEGER DEFAULT 1 -- 1: Active | 0: Muted / blocked
+  notifications_enabled INTEGER DEFAULT 1,-- 1: Active | 0: Muted / blocked
+  pending_target_id INTEGER DEFAULT NULL  -- Temporary node/job pointer
 );
 
 -- 2. Dynamic Hierarchy Tree (Departments, Semesters, Courses, Sections)
@@ -141,7 +165,8 @@ CREATE TABLE user_permissions (
 -- 5. Broadcast Jobs Queue (Cloudflare Cron Triggers)
 CREATE TABLE broadcast_jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  dept_node_id INTEGER NOT NULL,
+  target_type TEXT NOT NULL DEFAULT 'department', -- 'department' | 'all_admins'
+  dept_node_id INTEGER DEFAULT NULL,
   dept_title TEXT NOT NULL,
   sender_id INTEGER NOT NULL,
   from_chat_id INTEGER NOT NULL,
@@ -153,7 +178,36 @@ CREATE TABLE broadcast_jobs (
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
--- 6. System Settings & Archive Channel
+-- 6. Student Submissions Queue Table (Silent Moderation)
+CREATE TABLE submissions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  course_node_id INTEGER NOT NULL,        -- Course node ID where student contributed
+  student_id INTEGER NOT NULL,
+  student_name TEXT,
+  file_name TEXT NOT NULL,
+  telegram_file_id TEXT NOT NULL,
+  file_type TEXT NOT NULL,                -- 'document' | 'photo' | 'video'
+  caption TEXT DEFAULT NULL,
+  backup_message_id INTEGER DEFAULT NULL,
+  status TEXT DEFAULT 'pending',          -- 'pending' | 'approved' | 'ignored'
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (course_node_id) REFERENCES nodes(id) ON DELETE CASCADE
+);
+
+-- 7. Weekly Tasks & Deadlines Table
+CREATE TABLE weekly_tasks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  dept_node_id INTEGER NOT NULL,          -- Department ID (CS, IT, IS, Networks)
+  course_title TEXT NOT NULL,
+  task_title TEXT NOT NULL,
+  due_date DATETIME NOT NULL,             -- Auto-hides once current time passes due_date
+  attachment_file_id TEXT DEFAULT NULL,
+  created_by INTEGER,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (dept_node_id) REFERENCES nodes(id) ON DELETE CASCADE
+);
+
+-- 8. System Settings & Archive Channel
 CREATE TABLE settings (
   key TEXT PRIMARY KEY,
   value TEXT
@@ -163,6 +217,8 @@ CREATE INDEX idx_nodes_parent_order ON nodes(parent_id, sort_order);
 CREATE INDEX idx_materials_node ON materials(node_id);
 CREATE INDEX idx_users_sub ON users(subscribed_dept_id, notifications_enabled, telegram_id);
 CREATE INDEX idx_broadcast_status ON broadcast_jobs(status, id);
+CREATE INDEX idx_submissions_course ON submissions(course_node_id, status);
+CREATE INDEX idx_tasks_dept_due ON weekly_tasks(dept_node_id, due_date);
 ```
 
 ---
@@ -248,9 +304,12 @@ BOT_TOKEN="your_token" SUPER_ADMIN_ID="your_id" node scripts/set_commands.js
 | Command | Description | Access Scope |
 | :--- | :--- | :--- |
 | `/start` | 🏠 Open main menu and toggle Student/Admin mode | Public (All users) |
+| `/tasks` | 📅 View weekly tasks, assignment sheets & deadlines | Public (All users) |
 | `/notifications` | 🔔 Student department subscription and alert settings | Public (All users) |
 | `/id` | 🆔 Display and tap-to-copy your numeric Telegram ID | Public (All users) |
 | `/admin` | 👑 Open Super Admin Dashboard (channel status, leader list) | Super Admin Only 🔒 |
+| `/stats` | 📊 Comprehensive Dual Analytics (Overview & Empty Courses) | Super Admin & Leaders 🔒 |
+| `/notify_admins` | 📢 Instant broadcast to all leaders and admins | Super Admin Only 🔒 |
 | `/leaders` | 👥 Manage assigned department scopes per leader | Super Admin Only 🔒 |
 | `/promote <ID>` | ➕ Promote user to Leader and assign department scopes | Super Admin Only 🔒 |
 | `/demote <ID>` | 🗑️ Revoke leadership and delete all assigned permissions | Super Admin Only 🔒 |

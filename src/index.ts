@@ -14,9 +14,23 @@ interface UserRow {
   view_mode: "admin" | "student";
   managed_node_id: number | null;
   current_node_id: number | null;
-  bot_state: "browsing" | "awaiting_folder" | "uploading" | "renaming" | "deleting" | "awaiting_leader_id" | "awaiting_broadcast";
+  bot_state:
+    | "browsing"
+    | "awaiting_folder"
+    | "uploading"
+    | "renaming"
+    | "deleting"
+    | "awaiting_leader_id"
+    | "awaiting_broadcast"
+    | "awaiting_admin_broadcast"
+    | "awaiting_submission"
+    | "awaiting_submission_folder"
+    | "awaiting_task_title"
+    | "awaiting_task_days"
+    | "awaiting_task_attachment";
   subscribed_dept_id: number | null;
   notifications_enabled: number;
+  pending_target_id: number | null;
 }
 
 interface NodeRow {
@@ -47,7 +61,8 @@ interface FolderWithMaterials {
 
 interface BroadcastJobRow {
   id: number;
-  dept_node_id: number;
+  target_type: "department" | "all_admins";
+  dept_node_id: number | null;
   dept_title: string;
   sender_id: number;
   from_chat_id: number;
@@ -57,6 +72,47 @@ interface BroadcastJobRow {
   failed_count: number;
   status: "pending" | "processing" | "completed" | "cancelled";
   created_at: string;
+}
+
+interface SubmissionRow {
+  id: number;
+  course_node_id: number;
+  student_id: number;
+  student_name: string | null;
+  file_name: string;
+  telegram_file_id: string;
+  file_type: "document" | "photo" | "video";
+  caption: string | null;
+  backup_message_id: number | null;
+  status: "pending" | "approved" | "ignored";
+  created_at: string;
+}
+
+interface WeeklyTaskRow {
+  id: number;
+  dept_node_id: number;
+  course_title: string;
+  task_title: string;
+  due_date: string;
+  attachment_file_id: string | null;
+  created_by: number | null;
+  created_at: string;
+}
+
+// ================= INPUT VALIDATION & SAFE STATE GUARD =================
+
+const RESERVED_PATTERNS = [
+  "Back", "Cancel", "رجوع", "إلغاء", "تم",
+  "إضافة", "رفع", "تعديل", "حذف",
+  "تخصيص", "تحميل", "عرض وتحميل",
+  "الرئيسية", "القائمة", "وضع", "إعدادات", "الإشعارات",
+  "تاسكات", "ساهم", "إرسال", "اشتراك", "تخطي"
+];
+
+function isReservedButton(text: string): boolean {
+  const clean = text.trim();
+  if (!clean || clean.startsWith("/")) return true;
+  return RESERVED_PATTERNS.some((pattern) => clean.includes(pattern));
 }
 
 // ================= BACKGROUND BROADCAST QUEUE WORKER =================
@@ -77,17 +133,31 @@ async function processBroadcastQueue(env: Env): Promise<void> {
       .run();
   }
 
-  // Fetch up to 35 students subscribed to this department (stays well below Cloudflare free tier subrequest limit of 50)
-  const { results: students } = await env.DB.prepare(
-    `SELECT telegram_id FROM users 
-     WHERE subscribed_dept_id = ? AND notifications_enabled = 1 AND telegram_id > ? 
-     ORDER BY telegram_id ASC LIMIT 35`
-  )
-    .bind(job.dept_node_id, job.last_user_id || 0)
-    .all<{ telegram_id: number }>();
+  // Fetch up to 35 recipients per tick (stays well below Cloudflare free tier subrequest limit of 50)
+  let students: { telegram_id: number }[] = [];
 
-  if (!students || students.length === 0) {
-    // All subscribers processed for this job
+  if (job.target_type === "all_admins") {
+    const { results } = await env.DB.prepare(
+      `SELECT telegram_id FROM users 
+       WHERE role IN ('leader', 'super_admin') AND telegram_id > ? 
+       ORDER BY telegram_id ASC LIMIT 35`
+    )
+      .bind(job.last_user_id || 0)
+      .all<{ telegram_id: number }>();
+    students = results || [];
+  } else {
+    const { results } = await env.DB.prepare(
+      `SELECT telegram_id FROM users 
+       WHERE subscribed_dept_id = ? AND notifications_enabled = 1 AND telegram_id > ? 
+       ORDER BY telegram_id ASC LIMIT 35`
+    )
+      .bind(job.dept_node_id, job.last_user_id || 0)
+      .all<{ telegram_id: number }>();
+    students = results || [];
+  }
+
+  if (students.length === 0) {
+    // All recipients processed for this job
     await env.DB.prepare("UPDATE broadcast_jobs SET status = 'completed' WHERE id = ?")
       .bind(job.id)
       .run();
@@ -97,10 +167,10 @@ async function processBroadcastQueue(env: Env): Promise<void> {
       await bot.api.sendMessage(
         job.sender_id,
         `📢 **تقرير إرسال الإشعار:**\n\n` +
-          `• القسم: **${job.dept_title}**\n` +
-          `• تم الإرسال بنجاح: **${job.sent_count}** طالب ✅\n` +
-          `• تعذر الإرسال: **${job.failed_count}** ⚠️\n\n` +
-          `✅ اكتمل إرسال الإشعار لجميع المشتركين في القسم بنجاح.`,
+          `• الوجهة: **${job.dept_title}**\n` +
+          `• تم الإرسال بنجاح: **${job.sent_count}** ✅\n` +
+          `• تعذر الإرسال (أو حظر البوت): **${job.failed_count}** ⚠️\n\n` +
+          `✅ اكتمل إرسال الإشعار لجميع المستهدفين بنجاح.`,
         { parse_mode: "Markdown" }
       );
     } catch (e) {}
@@ -200,6 +270,7 @@ export default {
           bot_state: "browsing",
           subscribed_dept_id: null,
           notifications_enabled: 1,
+          pending_target_id: null,
         };
       } else if (isSuper && user.role !== "super_admin") {
         await env.DB.prepare("UPDATE users SET role = 'super_admin' WHERE telegram_id = ?")
@@ -222,25 +293,28 @@ export default {
       telegramId: number,
       state: UserRow["bot_state"],
       currentNodeId?: number | null,
-      managedNodeId?: number | null
+      managedNodeId?: number | null,
+      pendingTargetId?: number | null
     ) {
-      if (currentNodeId !== undefined && managedNodeId !== undefined) {
-        await env.DB.prepare("UPDATE users SET bot_state = ?, current_node_id = ?, managed_node_id = ? WHERE telegram_id = ?")
-          .bind(state, currentNodeId, managedNodeId, telegramId)
-          .run();
-      } else if (currentNodeId !== undefined) {
-        await env.DB.prepare("UPDATE users SET bot_state = ?, current_node_id = ? WHERE telegram_id = ?")
-          .bind(state, currentNodeId, telegramId)
-          .run();
-      } else if (managedNodeId !== undefined) {
-        await env.DB.prepare("UPDATE users SET bot_state = ?, managed_node_id = ? WHERE telegram_id = ?")
-          .bind(state, managedNodeId, telegramId)
-          .run();
-      } else {
-        await env.DB.prepare("UPDATE users SET bot_state = ? WHERE telegram_id = ?")
-          .bind(state, telegramId)
-          .run();
+      const updates: string[] = ["bot_state = ?"];
+      const params: any[] = [state];
+
+      if (currentNodeId !== undefined) {
+        updates.push("current_node_id = ?");
+        params.push(currentNodeId);
       }
+      if (managedNodeId !== undefined) {
+        updates.push("managed_node_id = ?");
+        params.push(managedNodeId);
+      }
+      if (pendingTargetId !== undefined) {
+        updates.push("pending_target_id = ?");
+        params.push(pendingTargetId);
+      }
+
+      params.push(telegramId);
+      const sql = `UPDATE users SET ${updates.join(", ")} WHERE telegram_id = ?`;
+      await env.DB.prepare(sql).bind(...params).run();
     }
 
     async function canManage(user: UserRow, nodeId: number | null): Promise<boolean> {
@@ -280,6 +354,59 @@ export default {
         .bind(nodeId)
         .first<NodeRow>();
       return res || null;
+    }
+
+    async function getCourseNode(nodeId: number): Promise<NodeRow | null> {
+      const { results: ancestors } = await env.DB.prepare(
+        `WITH RECURSIVE node_path(id, parent_id, title, sort_order, created_by, is_full_width, depth) AS (
+          SELECT id, parent_id, title, sort_order, created_by, is_full_width, 0 FROM nodes WHERE id = ?
+          UNION ALL
+          SELECT n.id, n.parent_id, n.title, n.sort_order, n.created_by, n.is_full_width, np.depth + 1
+          FROM nodes n JOIN node_path np ON n.id = np.parent_id
+        )
+        SELECT * FROM node_path ORDER BY depth DESC`
+      ).bind(nodeId).all<NodeRow & { depth: number }>();
+
+      if (!ancestors || ancestors.length < 3) return null;
+      // ancestors[0] = Root Dept, ancestors[1] = Semester/Term, ancestors[2] = Course
+      return ancestors[2] || null;
+    }
+
+    async function handleFolderCreateOrRename(
+      user: UserRow,
+      rawInput: string,
+      isRename: boolean,
+      targetNodeId: number | null
+    ): Promise<{ ok: boolean; cleanTitle?: string; errorMsg?: string }> {
+      const cleanTitle = rawInput.trim();
+
+      // 1. Guard against reserved button labels
+      if (isReservedButton(cleanTitle)) {
+        return { ok: false, errorMsg: "⚠️ لا يمكن استخدام هذا الاسم لأنه يطابق زراً أو أمراً محجوزاً في النظام." };
+      }
+
+      // 2. Resolve parent ID
+      let parentId: number | null = null;
+      if (isRename && targetNodeId) {
+        const node = await env.DB.prepare("SELECT parent_id FROM nodes WHERE id = ?").bind(targetNodeId).first<{ parent_id: number | null }>();
+        parentId = node?.parent_id ?? null;
+      } else {
+        parentId = user.current_node_id;
+      }
+
+      // 3. Duplicate Prevention at the same level
+      const duplicate = await env.DB.prepare(
+        `SELECT id FROM nodes 
+         WHERE (parent_id IS ? OR parent_id = ?) 
+         AND LOWER(TRIM(title)) = LOWER(?) 
+         AND (? IS NULL OR id != ?)`
+      ).bind(parentId, parentId, cleanTitle, targetNodeId, targetNodeId).first();
+
+      if (duplicate) {
+        return { ok: false, errorMsg: "⚠️ يوجد مجلد أو خانة أخرى بنفس هذا الاسم في هذا المستوى بالفعل." };
+      }
+
+      return { ok: true, cleanTitle };
     }
 
     async function getChildNodes(parentId: number | null): Promise<NodeRow[]> {
@@ -370,7 +497,7 @@ export default {
         `🔔 **إعدادات الإشعارات واشتراك الأقسام:**\n\n` +
         `• قسمك المشترك به: **${currentSubDeptTitle}**\n` +
         `• حالة وصول التنبيهات: **${statusText}**\n\n` +
-        `📌 باشتراكك في قسمك، ستصلك تنبيهات فورية عند رفع محاضرات أو ملفات جديدة أو إعلانات هامة تخص قسمك فقط.\n\n` +
+        `📌 باشتراكك في قسمك، ستصلك تنبيهات فورية عند رفع محاضرات أو ملفات جديدة أو إعلانات وتاسكات تخص قسمك فقط.\n\n` +
         `اختر قسمك من القائمة أدناه لتحديث الاشتراك 👇`;
 
       if (ctx.callbackQuery) {
@@ -384,11 +511,187 @@ export default {
       }
     }
 
+    async function renderWeeklyTasks(ctx: any, user: UserRow) {
+      if (!user.subscribed_dept_id) {
+        const inlineKb = new InlineKeyboard()
+          .text("🔔 تحديد واشتراك القسم الآن", "open_notifications_from_tasks")
+          .row();
+        return ctx.reply(
+          `⚠️ **يرجى تحديد قسمك الأكاديمي أولاً!**\n\n` +
+            `لعرض تاسكات وتسليمات المواد الخاصة بقسمك بدقة، اضغط الزر أدناه لاختيار قسمك.`,
+          { parse_mode: "Markdown", reply_markup: inlineKb }
+        );
+      }
+
+      const deptNode = await env.DB.prepare("SELECT title FROM nodes WHERE id = ?")
+        .bind(user.subscribed_dept_id)
+        .first<{ title: string }>();
+
+      const { results: tasks } = await env.DB.prepare(
+        `SELECT * FROM weekly_tasks 
+         WHERE dept_node_id = ? AND due_date >= datetime('now') 
+         ORDER BY due_date ASC`
+      )
+        .bind(user.subscribed_dept_id)
+        .all<WeeklyTaskRow>();
+
+      if (!tasks || tasks.length === 0) {
+        return ctx.reply(
+          `🎉 **لا توجد تسليمات أو تاسكات مطلوبة حالياً!**\n\n` +
+            `• القسم: **${deptNode?.title || "قسمك الأكاديمي"}**\n` +
+            `استمتع بوقتك وراجع محاضراتك أولاً بأول! 🚀`,
+          { parse_mode: "Markdown" }
+        );
+      }
+
+      const inlineKeyboard = new InlineKeyboard();
+      let message = `📅 **تاسكات وتسليمات الأسبوع — [${deptNode?.title}]:**\n\n`;
+
+      const now = Date.now();
+      tasks.forEach((t, index) => {
+        const dueTime = new Date(t.due_date).getTime();
+        const diffHours = Math.round((dueTime - now) / (1000 * 60 * 60));
+        const diffDays = Math.ceil(diffHours / 24);
+        const remainingText = diffHours <= 24 ? `متبقي ${Math.max(1, diffHours)} ساعة ⚠️` : `متبقي ${diffDays} يوم`;
+
+        message += `${index + 1}️⃣ **مادة ${t.course_title}**\n`;
+        message += `📝 **التكليف:** ${t.task_title}\n`;
+        message += `⏰ **الموعد النهائي:** ${t.due_date} (${remainingText})\n\n`;
+
+        if (t.attachment_file_id) {
+          inlineKeyboard.text(`📥 تحميل شيت: ${t.course_title}`, `dl_task_${t.id}`).row();
+        }
+      });
+
+      inlineKeyboard.text("❌ إغلاق", "close_tasks");
+
+      await ctx.reply(message, { parse_mode: "Markdown", reply_markup: inlineKeyboard });
+    }
+
+    async function renderStats(ctx: any, user: UserRow) {
+      if (user.role === "super_admin") {
+        const totalUsers = (await env.DB.prepare("SELECT COUNT(*) as c FROM users").first<{ c: number }>())?.c || 0;
+        const activeSub = (await env.DB.prepare("SELECT COUNT(*) as c FROM users WHERE notifications_enabled = 1 AND subscribed_dept_id IS NOT NULL").first<{ c: number }>())?.c || 0;
+        const mutedUsers = (await env.DB.prepare("SELECT COUNT(*) as c FROM users WHERE notifications_enabled = 0").first<{ c: number }>())?.c || 0;
+
+        const { results: depts } = await env.DB.prepare(
+          "SELECT id, title FROM nodes WHERE parent_id IS NULL ORDER BY sort_order ASC, id ASC"
+        ).all<{ id: number; title: string }>();
+
+        let deptDetails = "";
+        for (const d of depts || []) {
+          const subCount = (await env.DB.prepare("SELECT COUNT(*) as c FROM users WHERE subscribed_dept_id = ?").bind(d.id).first<{ c: number }>())?.c || 0;
+          const pct = totalUsers > 0 ? Math.round((subCount / totalUsers) * 100) : 0;
+
+          const matCount = (await env.DB.prepare(
+            `WITH RECURSIVE subnodes(id) AS (
+              SELECT id FROM nodes WHERE id = ?
+              UNION ALL
+              SELECT n.id FROM nodes n JOIN subnodes s ON n.parent_id = s.id
+            )
+            SELECT COUNT(*) as c FROM materials WHERE node_id IN (SELECT id FROM subnodes)`
+          ).bind(d.id).first<{ c: number }>())?.c || 0;
+
+          deptDetails += `• **${d.title}:**\n  👥 الطلاب المشتركون: **${subCount}** (${pct}%)\n  📚 الملفات المرفوعة: **${matCount}** ملف\n\n`;
+        }
+
+        // Empty courses check (gap analysis)
+        const { results: allCourses } = await env.DB.prepare(
+          `SELECT c.id, c.title, d.title as dept_title
+           FROM nodes c
+           JOIN nodes t ON c.parent_id = t.id
+           JOIN nodes d ON t.parent_id = d.id
+           WHERE d.parent_id IS NULL`
+        ).all<{ id: number; title: string; dept_title: string }>();
+
+        const emptyCourses: string[] = [];
+        for (const c of allCourses || []) {
+          const hasMats = await env.DB.prepare(
+            `WITH RECURSIVE subnodes(id) AS (
+              SELECT id FROM nodes WHERE id = ?
+              UNION ALL
+              SELECT n.id FROM nodes n JOIN subnodes s ON n.parent_id = s.id
+            )
+            SELECT 1 FROM materials WHERE node_id IN (SELECT id FROM subnodes) LIMIT 1`
+          ).bind(c.id).first();
+
+          if (!hasMats) {
+            emptyCourses.push(`${c.title} (${c.dept_title})`);
+          }
+        }
+
+        let emptySection = "";
+        if (emptyCourses.length > 0) {
+          emptySection = `⚠️ **المواد الفارغة (بدون أي ملفات حتى الآن):**\n` + emptyCourses.map(e => `• ${e}`).join("\n");
+        } else {
+          emptySection = `🎉 **رائع! جميع المواد تم رفع محتوى بداخلها.**`;
+        }
+
+        const text =
+          `📊 **لوحة إحصائيات النظام الشاملة (Super Admin):**\n\n` +
+          `👤 إجمالي مستخدمي البوت: **${totalUsers}** مستخدم\n` +
+          `🔔 الإشعارات النشطة: **${activeSub}** طالب ✅\n` +
+          `🔕 الإشعارات المكتومة: **${mutedUsers}** ⚠️\n\n` +
+          `🏫 **تفاصيل الأقسام:**\n${deptDetails}` +
+          `${emptySection}`;
+
+        await ctx.reply(text, { parse_mode: "Markdown" });
+        return;
+      }
+
+      if (user.role === "leader") {
+        const { results: perms } = await env.DB.prepare(
+          `SELECT n.id, n.title FROM user_permissions p JOIN nodes n ON p.node_id = n.id WHERE p.telegram_id = ?`
+        ).bind(user.telegram_id).all<{ id: number; title: string }>();
+
+        if (!perms || perms.length === 0) {
+          return ctx.reply("⚠️ لم يتم تعيين أي أقسام لك بعد.");
+        }
+
+        let text = `📊 **إحصائيات أقسامك المسندة إليك (Leader View):**\n\n`;
+
+        for (const p of perms) {
+          const subCount = (await env.DB.prepare(
+            "SELECT COUNT(*) as c FROM users WHERE subscribed_dept_id = ? AND notifications_enabled = 1"
+          ).bind(p.id).first<{ c: number }>())?.c || 0;
+
+          const totalDeptUsers = (await env.DB.prepare(
+            "SELECT COUNT(*) as c FROM users WHERE subscribed_dept_id = ?"
+          ).bind(p.id).first<{ c: number }>())?.c || 0;
+
+          const pendingSubmissions = (await env.DB.prepare(
+            `WITH RECURSIVE subnodes(id) AS (
+              SELECT id FROM nodes WHERE id = ?
+              UNION ALL
+              SELECT n.id FROM nodes n JOIN subnodes s ON n.parent_id = s.id
+            )
+            SELECT COUNT(*) as c FROM submissions WHERE status = 'pending' AND course_node_id IN (SELECT id FROM subnodes)`
+          ).bind(p.id).first<{ c: number }>())?.c || 0;
+
+          const activeTasks = (await env.DB.prepare(
+            "SELECT COUNT(*) as c FROM weekly_tasks WHERE dept_node_id = ? AND due_date >= datetime('now')"
+          ).bind(p.id).first<{ c: number }>())?.c || 0;
+
+          text +=
+            `🏫 **قسم ${p.title}:**\n` +
+            `• المشتركون في الإشعارات: **${subCount}** طالب (من أصل ${totalDeptUsers})\n` +
+            `• تاسكات الأسبوع النشطة: **${activeTasks}** تاسك\n` +
+            `• مساهمات الطلاب بانتظار المراجعة: **${pendingSubmissions}** مساهمة ${pendingSubmissions > 0 ? "⚠️" : "✅"}\n\n`;
+        }
+
+        await ctx.reply(text, { parse_mode: "Markdown" });
+        return;
+      }
+
+      await ctx.reply("❌ هذا الأمر مخصص للمسؤولين والليدرز فقط.");
+    }
+
     async function renderFolderView(ctx: any, user: UserRow, nodeId: number | null) {
       const children = await getChildNodes(nodeId);
       const materials = nodeId ? await getNodeMaterials(nodeId) : [];
       const isManager = await canManage(user, nodeId);
       const privileged = isPrivileged(user);
+      const courseNode = nodeId ? await getCourseNode(nodeId) : null;
 
       const keyboard = new Keyboard();
       keyboard.resized();
@@ -434,6 +737,11 @@ export default {
         keyboard.text("📥 إرسال الملفات").row();
       }
 
+      // Crowdsourced student note contribution button (visible to students inside course or its subfolders)
+      if (!isManager && courseNode !== null) {
+        keyboard.text("📝 ساهم بملخص أو امتحان").row();
+      }
+
       // Admin Action Bar (if in admin view mode)
       if (isManager && nodeId !== null) {
         keyboard
@@ -445,6 +753,8 @@ export default {
           .row()
           .text("🗑️ حذف خانة أو ملف")
           .text("📢 إرسال إشعار للقسم")
+          .row()
+          .text("📅 إضافة تاسك للأسبوع")
           .row();
       } else if (isManager && nodeId === null) {
         keyboard
@@ -453,9 +763,13 @@ export default {
           .row();
       }
 
-      // Student notification subscription UI at root level (nodeId === null)
+      // Student tools at root level (nodeId === null)
       if (nodeId === null) {
-        keyboard.text("🔔 إعدادات الإشعارات واشتراك القسم").row();
+        keyboard
+          .text("📅 تاسكات وتسليمات الأسبوع الحالي")
+          .row()
+          .text("🔔 إعدادات الإشعارات واشتراك القسم")
+          .row();
       }
 
       // Navigation Buttons
@@ -559,7 +873,7 @@ export default {
     // ================= COMMANDS & LOGIC =================
 
     async function renderTopLevel(ctx: any, user: UserRow) {
-      await updateUserState(user.telegram_id, "browsing", null);
+      await updateUserState(user.telegram_id, "browsing", null, null, null);
       user.current_node_id = null;
       user.bot_state = "browsing";
 
@@ -597,6 +911,16 @@ export default {
       await renderNotificationSettings(ctx, user);
     });
 
+    bot.command(["tasks", "deadlines"], async (ctx) => {
+      const user = await getUser(ctx.from!.id, ctx.from!.first_name);
+      await renderWeeklyTasks(ctx, user);
+    });
+
+    bot.command("stats", async (ctx) => {
+      const user = await getUser(ctx.from!.id, ctx.from!.first_name);
+      await renderStats(ctx, user);
+    });
+
     bot.command("id", async (ctx) => {
       const id = ctx.from!.id;
       const name = ctx.from!.first_name || "مستخدم";
@@ -614,6 +938,10 @@ export default {
       const inlineKeyboard = new InlineKeyboard()
         .text("👥 إدارة الليدرز وصلاحيات الأقسام", "admin_list_leaders")
         .row()
+        .text("📢 مراسلة جميع القادة والمشرفين", "admin_notify_all_leaders")
+        .row()
+        .text("📊 لوحة الإحصائيات الشاملة", "admin_stats")
+        .row()
         .text("➕ تعيين ليدر جديد", "admin_add_leader")
         .row()
         .text("❌ إغلاق", "close_admin");
@@ -621,7 +949,8 @@ export default {
       const messageText =
         `👑 **لوحة تحكم المسؤول العام (Super Admin):**\n\n` +
         `• يمكنك تعيين ليدرز وتحديد الأقسام المسموح لكل ليدر بإدارتها.\n` +
-        `• ليدر قسم معين يمكنه إضافة وحذف وتعديل محتوى هذا القسم فقط دون التأثير على باقي الأقسام.\n\n` +
+        `• يمكنك إرسال تعميم فوري لكافة القادة والمشرفين.\n` +
+        `• الاطلاع على الإحصائيات الشاملة والمواد التي لم تُرفع بعد.\n\n` +
         `• قناة الأرشيف: ${backupChannel ? `\`${backupChannel}\` ✅` : "غير مربوطة ⚠️"}`;
 
       if (ctx.callbackQuery) {
@@ -663,6 +992,7 @@ export default {
       }
 
       inlineKeyboard.text("➕ تعيين ليدر جديد", "admin_add_leader").row();
+      inlineKeyboard.text("📢 مراسلة جميع القادة والمشرفين", "admin_notify_all_leaders").row();
       inlineKeyboard.text("⬅️ رجوع للوحة الإدارة", "admin_back_to_panel").row();
 
       if (ctx.callbackQuery) {
@@ -748,6 +1078,23 @@ export default {
       await renderLeadersList(ctx);
     });
 
+    bot.command("notify_admins", async (ctx) => {
+      const user = await getUser(ctx.from!.id);
+      if (user.role !== "super_admin") {
+        return ctx.reply("❌ هذا الأمر مخصص للمسؤول العام فقط.");
+      }
+      await updateUserState(user.telegram_id, "awaiting_admin_broadcast");
+      user.bot_state = "awaiting_admin_broadcast";
+      const cancelKeyboard = new Keyboard().text("❌ إلغاء").resized();
+      await ctx.reply(
+        `📢 **مراسلة جميع القادة والمشرفين:**\n\n` +
+          `✍️ أرسل الآن الرسالة أو المنشور المراد تعميمه على كافة الليدرز والمشرفين بالكلية.\n` +
+          `(يمكنك إرسال نص، صورة، أو فيديو)\n\n` +
+          `اضغط زر [❌ إلغاء] للتراجع.`,
+        { parse_mode: "Markdown", reply_markup: cancelKeyboard }
+      );
+    });
+
     bot.command("promote", async (ctx) => {
       const admin = await getUser(ctx.from!.id);
       if (admin.role !== "super_admin") return;
@@ -794,9 +1141,35 @@ export default {
       const user = await getUser(ctx.from!.id, ctx.from!.first_name);
       const text = ctx.message.text?.trim();
 
+      // Priority 1: Navigation & Cancellation Guard (Prevents state corruption)
+      const isNavCancel =
+        text === "❌ إلغاء" ||
+        text === "⬅️ رجوع" ||
+        text === "🏠 الرئيسية" ||
+        text === "🏠 تبديل الوضع" ||
+        text === "إلغاء" ||
+        text === "رجوع" ||
+        (text && text.startsWith("/") && text !== "/start" && !text.startsWith("/promote") && !text.startsWith("/demote"));
+
+      if (isNavCancel && user.bot_state !== "browsing") {
+        await updateUserState(user.telegram_id, "browsing", user.current_node_id, null, null);
+        user.bot_state = "browsing";
+        user.managed_node_id = null;
+        user.pending_target_id = null;
+        await ctx.reply("تم الإلغاء والعودة إلى وضع التصفح.");
+        await renderFolderView(ctx, user, user.current_node_id);
+        return;
+      }
+
       // Notification settings menu trigger
       if (text === "🔔 إعدادات الإشعارات واشتراك القسم") {
         await renderNotificationSettings(ctx, user);
+        return;
+      }
+
+      // Weekly tasks menu trigger
+      if (text === "📅 تاسكات وتسليمات الأسبوع الحالي") {
+        await renderWeeklyTasks(ctx, user);
         return;
       }
 
@@ -838,14 +1211,6 @@ export default {
 
       // State: AWAITING LEADER ID
       if (user.bot_state === "awaiting_leader_id") {
-        if (text === "❌ إلغاء" || text === "⬅️ رجوع" || text === "🏠 الرئيسية" || text === "إلغاء") {
-          await updateUserState(user.telegram_id, "browsing");
-          user.bot_state = "browsing";
-          await ctx.reply("تم إلغاء التعيين.");
-          await renderFolderView(ctx, user, user.current_node_id);
-          return;
-        }
-
         let targetId: number | null = null;
         let targetName: string | null = null;
 
@@ -873,7 +1238,7 @@ export default {
             .run();
         }
 
-        await updateUserState(user.telegram_id, "browsing");
+        await updateUserState(user.telegram_id, "browsing", user.current_node_id, null, null);
         user.bot_state = "browsing";
 
         await ctx.reply(`✅ تم تعيين المستخدم (${targetId}) كليدر بنجاح.\nحدد الآن الأقسام المسموح له بإدارتها 👇`);
@@ -881,19 +1246,11 @@ export default {
         return;
       }
 
-      // State: AWAITING BROADCAST MESSAGE
+      // State: AWAITING BROADCAST MESSAGE (Department Broadcast)
       if (user.bot_state === "awaiting_broadcast") {
-        if (text === "❌ إلغاء" || text === "⬅️ رجوع" || text === "🏠 الرئيسية" || text === "إلغاء") {
-          await updateUserState(user.telegram_id, "browsing", user.current_node_id, null);
-          user.bot_state = "browsing";
-          await ctx.reply("تم إلغاء إرسال الإشعار.");
-          await renderFolderView(ctx, user, user.current_node_id);
-          return;
-        }
-
         const targetDeptId = user.managed_node_id;
         if (!targetDeptId) {
-          await updateUserState(user.telegram_id, "browsing", user.current_node_id, null);
+          await updateUserState(user.telegram_id, "browsing", user.current_node_id, null, null);
           user.bot_state = "browsing";
           await ctx.reply("⚠️ حدث خطأ في تحديد القسم المستهدف.");
           await renderFolderView(ctx, user, user.current_node_id);
@@ -907,8 +1264,8 @@ export default {
         const deptTitle = deptNode?.title || "القسم";
 
         await env.DB.prepare(
-          `INSERT INTO broadcast_jobs (dept_node_id, dept_title, sender_id, from_chat_id, message_id, status)
-           VALUES (?, ?, ?, ?, ?, 'pending')`
+          `INSERT INTO broadcast_jobs (target_type, dept_node_id, dept_title, sender_id, from_chat_id, message_id, status)
+           VALUES ('department', ?, ?, ?, ?, ?, 'pending')`
         )
           .bind(targetDeptId, deptTitle, user.telegram_id, ctx.chat.id, ctx.message.message_id)
           .run();
@@ -919,7 +1276,7 @@ export default {
           .bind(targetDeptId)
           .first<{ count: number }>();
 
-        await updateUserState(user.telegram_id, "browsing", user.current_node_id, null);
+        await updateUserState(user.telegram_id, "browsing", user.current_node_id, null, null);
         user.bot_state = "browsing";
 
         await ctx.reply(
@@ -935,6 +1292,323 @@ export default {
         return;
       }
 
+      // State: AWAITING ADMIN BROADCAST (Super Admin -> All Leaders)
+      if (user.bot_state === "awaiting_admin_broadcast") {
+        await env.DB.prepare(
+          `INSERT INTO broadcast_jobs (target_type, dept_node_id, dept_title, sender_id, from_chat_id, message_id, status)
+           VALUES ('all_admins', 0, 'جميع القادة والمشرفين', ?, ?, ?, 'pending')`
+        )
+          .bind(user.telegram_id, ctx.chat.id, ctx.message.message_id)
+          .run();
+
+        const adminCount = await env.DB.prepare(
+          "SELECT COUNT(*) as count FROM users WHERE role IN ('leader', 'super_admin')"
+        ).first<{ count: number }>();
+
+        await updateUserState(user.telegram_id, "browsing", user.current_node_id, null, null);
+        user.bot_state = "browsing";
+
+        await ctx.reply(
+          `✅ **تم جدولة الإرسال لجميع القادة والمشرفين!**\n\n` +
+            `• عدد المسؤولين المستهدفين: **${adminCount?.count || 0}** قائد\n\n` +
+            `⏳ يجري الإرسال في الخلفية الآن...`,
+          { parse_mode: "Markdown" }
+        );
+
+        executionCtx.waitUntil(processBroadcastQueue(env));
+        await renderFolderView(ctx, user, user.current_node_id);
+        return;
+      }
+
+      // State: AWAITING STUDENT SUBMISSION (Crowdsourced Notes)
+      if (user.bot_state === "awaiting_submission") {
+        const courseId = user.pending_target_id;
+        if (!courseId) {
+          await updateUserState(user.telegram_id, "browsing", user.current_node_id, null, null);
+          user.bot_state = "browsing";
+          await ctx.reply("حدث خطأ في تحديد المادة.");
+          await renderFolderView(ctx, user, user.current_node_id);
+          return;
+        }
+
+        let fileId: string | null = null;
+        let fileName = "ملخص طالب";
+        let fileType: "document" | "photo" | "video" = "document";
+        const caption = ctx.message.caption || null;
+
+        if (ctx.message.document) {
+          fileId = ctx.message.document.file_id;
+          fileName = ctx.message.document.file_name || "الملف.pdf";
+          fileType = "document";
+        } else if (ctx.message.photo) {
+          const highestPhoto = ctx.message.photo[ctx.message.photo.length - 1];
+          fileId = highestPhoto.file_id;
+          fileName = "صورة_مساهمة.jpg";
+          fileType = "photo";
+        } else if (ctx.message.video) {
+          fileId = ctx.message.video.file_id;
+          fileName = ctx.message.video.file_name || "فيديو_مساهمة.mp4";
+          fileType = "video";
+        }
+
+        if (!fileId) {
+          await ctx.reply("⚠️ يرجى إرسال ملف PDF، صورة، أو فيديو للمساهمة بها، أو اضغط [❌ إلغاء].");
+          return;
+        }
+
+        const courseNode = await env.DB.prepare("SELECT title FROM nodes WHERE id = ?").bind(courseId).first<{ title: string }>();
+        const courseTitle = courseNode?.title || "المادة";
+
+        const subRes = await env.DB.prepare(
+          `INSERT INTO submissions (course_node_id, student_id, student_name, file_name, telegram_file_id, file_type, caption, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'pending') RETURNING id`
+        )
+          .bind(courseId, user.telegram_id, user.full_name || ctx.from?.first_name || "طالب", fileName, fileId, fileType, caption)
+          .first<{ id: number }>();
+
+        await updateUserState(user.telegram_id, "browsing", user.current_node_id, null, null);
+        user.bot_state = "browsing";
+
+        // Positive feedback to student (no embarrassment)
+        await ctx.reply(
+          `❤️ **شكراً لمساهمتك الجميلة يا ${user.full_name || ctx.from?.first_name || "بطل"}!**\n\n` +
+            `تم استلام الملف بنجاح لمراجعته واعتماده في مادة **${courseTitle}**.`,
+          { parse_mode: "Markdown" }
+        );
+
+        // Notify course leader(s)
+        if (subRes?.id) {
+          const subId = subRes.id;
+          executionCtx.waitUntil((async () => {
+            try {
+              const rootDept = await getRootDepartment(courseId);
+              let leaderIds: number[] = [];
+
+              if (rootDept) {
+                const { results: lRes } = await env.DB.prepare(
+                  "SELECT telegram_id FROM user_permissions WHERE node_id = ?"
+                ).bind(rootDept.id).all<{ telegram_id: number }>();
+                leaderIds = (lRes || []).map((l) => l.telegram_id);
+              }
+
+              if (leaderIds.length === 0 && env.SUPER_ADMIN_ID) {
+                leaderIds = [parseInt(env.SUPER_ADMIN_ID, 10)];
+              }
+
+              const modCardText =
+                `📥 **مساهمة طلابية جديدة بانتظار المراجعة:**\n\n` +
+                `• المادة: **${courseTitle}**\n` +
+                `• الطالب: **${user.full_name || "طالب"}** (\`${user.telegram_id}\`)\n` +
+                `• الملف: **${fileName}**\n` +
+                (caption ? `• الوصف: ${caption}\n\n` : `\n`) +
+                `اختر الإجراء المناسب 👇`;
+
+              const modKb = new InlineKeyboard()
+                .text("✅ قبول واختيار الفولدر", `sub_pick_folder:${subId}`)
+                .row()
+                .text("🗑️ تجاهل وحذف بصمت", `sub_ignore:${subId}`);
+
+              for (const lid of leaderIds) {
+                try {
+                  if (fileType === "photo") {
+                    await bot.api.sendPhoto(lid, fileId!, { caption: modCardText, parse_mode: "Markdown", reply_markup: modKb });
+                  } else if (fileType === "video") {
+                    await bot.api.sendVideo(lid, fileId!, { caption: modCardText, parse_mode: "Markdown", reply_markup: modKb });
+                  } else {
+                    await bot.api.sendDocument(lid, fileId!, { caption: modCardText, parse_mode: "Markdown", reply_markup: modKb });
+                  }
+                } catch (err) {}
+              }
+            } catch (e) {}
+          })());
+        }
+
+        await renderFolderView(ctx, user, user.current_node_id);
+        return;
+      }
+
+      // State: AWAITING SUBMISSION FOLDER NAME (Leader creating new folder for approved submission)
+      if (user.bot_state === "awaiting_submission_folder") {
+        const subId = user.pending_target_id;
+        const courseId = user.managed_node_id;
+
+        if (!subId || !courseId || !text) {
+          await updateUserState(user.telegram_id, "browsing", user.current_node_id, null, null);
+          user.bot_state = "browsing";
+          await ctx.reply("حدث خطأ.");
+          await renderFolderView(ctx, user, user.current_node_id);
+          return;
+        }
+
+        const check = await handleFolderCreateOrRename(user, text, false, null);
+        if (!check.ok) {
+          await ctx.reply(check.errorMsg || "⚠️ اسم غير صالح، يرجى إرسال اسم آخر أو [❌ إلغاء].");
+          return;
+        }
+        const cleanTitle = check.cleanTitle!;
+
+        const sub = await env.DB.prepare("SELECT * FROM submissions WHERE id = ?").bind(subId).first<SubmissionRow>();
+        if (!sub) {
+          await updateUserState(user.telegram_id, "browsing", user.current_node_id, null, null);
+          user.bot_state = "browsing";
+          return ctx.reply("لم يتم العثور على المساهمة.");
+        }
+
+        // Create new folder
+        const maxOrder = await env.DB.prepare("SELECT MAX(sort_order) as m FROM nodes WHERE parent_id = ?")
+          .bind(courseId)
+          .first<{ m: number | null }>();
+        const nextOrder = (maxOrder?.m ?? 0) + 1;
+
+        const newFolder = await env.DB.prepare(
+          "INSERT INTO nodes (parent_id, title, created_by, is_full_width, sort_order) VALUES (?, ?, ?, 0, ?) RETURNING id"
+        )
+          .bind(courseId, cleanTitle, user.telegram_id, nextOrder)
+          .first<{ id: number }>();
+
+        if (newFolder?.id) {
+          await env.DB.prepare(
+            `INSERT INTO materials (node_id, file_name, telegram_file_id, file_type, caption, uploaded_by)
+             VALUES (?, ?, ?, ?, ?, ?)`
+          )
+            .bind(newFolder.id, sub.file_name, sub.telegram_file_id, sub.file_type, sub.caption, sub.student_id)
+            .run();
+
+          await env.DB.prepare("UPDATE submissions SET status = 'approved' WHERE id = ?").bind(subId).run();
+        }
+
+        await updateUserState(user.telegram_id, "browsing", user.current_node_id, null, null);
+        user.bot_state = "browsing";
+
+        await ctx.reply(`✅ تم إنشاء مجلد **${cleanTitle}** ونشر ملف الطالب بداخله بنجاح!`, { parse_mode: "Markdown" });
+        await renderFolderView(ctx, user, user.current_node_id);
+        return;
+      }
+
+      // State: AWAITING TASK TITLE
+      if (user.bot_state === "awaiting_task_title") {
+        if (!text || isReservedButton(text)) {
+          return ctx.reply("⚠️ يرجى إرسال عنوان واضح للتاسك أو التكليف (مثال: 'تسليم الشيت الثالث').");
+        }
+
+        const deptId = user.managed_node_id;
+        const courseId = user.pending_target_id;
+        const courseNode = courseId ? await env.DB.prepare("SELECT title FROM nodes WHERE id = ?").bind(courseId).first<{ title: string }>() : null;
+
+        await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)")
+          .bind(
+            `task_draft_${user.telegram_id}`,
+            JSON.stringify({
+              dept_id: deptId,
+              course_title: courseNode?.title || "المقرر",
+              task_title: text,
+            })
+          )
+          .run();
+
+        await updateUserState(user.telegram_id, "awaiting_task_days", user.current_node_id, deptId, courseId);
+        user.bot_state = "awaiting_task_days";
+
+        await ctx.reply(
+          `⏰ **كم يوماً متبقياً للتسليم من الآن؟**\n\n` +
+            `أرسل رقماً فقط (مثال: "3" لـ 3 أيام، أو "7" لأسبوع كامل):\n` +
+            `(أو اضغط [❌ إلغاء] للتراجع)`,
+          { parse_mode: "Markdown" }
+        );
+        return;
+      }
+
+      // State: AWAITING TASK DAYS
+      if (user.bot_state === "awaiting_task_days") {
+        const days = text ? parseInt(text, 10) : NaN;
+        if (isNaN(days) || days <= 0 || days > 60) {
+          return ctx.reply("⚠️ يرجى إرسال عدد الأيام كرقم صحيح (بين 1 و 60 يوماً).");
+        }
+
+        const draftRow = await env.DB.prepare("SELECT value FROM settings WHERE key = ?")
+          .bind(`task_draft_${user.telegram_id}`)
+          .first<{ value: string }>();
+
+        if (!draftRow?.value) {
+          await updateUserState(user.telegram_id, "browsing", user.current_node_id, null, null);
+          user.bot_state = "browsing";
+          return ctx.reply("حدث خطأ.");
+        }
+
+        const draft = JSON.parse(draftRow.value);
+        const due = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+        const dueDateStr = due.toISOString().replace("T", " ").substring(0, 19);
+
+        draft.due_date = dueDateStr;
+        draft.days = days;
+        await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)")
+          .bind(`task_draft_${user.telegram_id}`, JSON.stringify(draft))
+          .run();
+
+        await updateUserState(user.telegram_id, "awaiting_task_attachment", user.current_node_id, draft.dept_id, null);
+        user.bot_state = "awaiting_task_attachment";
+
+        const skipKeyboard = new Keyboard().text("تخطي بدون ملف").row().text("❌ إلغاء").resized();
+        await ctx.reply(
+          `📎 **ملف الشيت أو التكليف (اختياري):**\n\n` +
+            `أرسل الآن ملف الـ PDF أو الصورة الخاصة بالشيت أو التكليف،\n` +
+            `أو اضغط زر **[تخطي بدون ملف]** لنشر التاسك فوراً دون إرفاق ملف.`,
+          { parse_mode: "Markdown", reply_markup: skipKeyboard }
+        );
+        return;
+      }
+
+      // State: AWAITING TASK ATTACHMENT
+      if (user.bot_state === "awaiting_task_attachment") {
+        const draftRow = await env.DB.prepare("SELECT value FROM settings WHERE key = ?")
+          .bind(`task_draft_${user.telegram_id}`)
+          .first<{ value: string }>();
+
+        if (!draftRow?.value) {
+          await updateUserState(user.telegram_id, "browsing", user.current_node_id, null, null);
+          user.bot_state = "browsing";
+          return ctx.reply("حدث خطأ.");
+        }
+
+        const draft = JSON.parse(draftRow.value);
+        let attachmentId: string | null = null;
+
+        if (ctx.message.document) {
+          attachmentId = ctx.message.document.file_id;
+        } else if (ctx.message.photo) {
+          const highestPhoto = ctx.message.photo[ctx.message.photo.length - 1];
+          attachmentId = highestPhoto.file_id;
+        }
+
+        const taskInsert = await env.DB.prepare(
+          `INSERT INTO weekly_tasks (dept_node_id, course_title, task_title, due_date, attachment_file_id, created_by)
+           VALUES (?, ?, ?, ?, ?, ?) RETURNING id`
+        )
+          .bind(draft.dept_id, draft.course_title, draft.task_title, draft.due_date, attachmentId, user.telegram_id)
+          .first<{ id: number }>();
+
+        await env.DB.prepare("DELETE FROM settings WHERE key = ?").bind(`task_draft_${user.telegram_id}`).run();
+        await updateUserState(user.telegram_id, "browsing", user.current_node_id, null, null);
+        user.bot_state = "browsing";
+
+        const notifyKb = new InlineKeyboard().text(
+          "🔔 إرسال تنبيه لطلاب القسم بهذا التاسك",
+          `notify_new_task_${taskInsert?.id}_${draft.dept_id}`
+        );
+
+        await ctx.reply(
+          `✅ **تم حفظ ونشر تاسك الأسبوع بنجاح!**\n\n` +
+            `• المادة: **${draft.course_title}**\n` +
+            `• التكليف: **${draft.task_title}**\n` +
+            `• الموعد: خلال **${draft.days}** أيام\n\n` +
+            `أصبح التاسك ظاهراً الآن في قائمة [📅 تاسكات الأسبوع]. هل تريد إشعار طلاب القسم به؟`,
+          { parse_mode: "Markdown", reply_markup: notifyKb }
+        );
+
+        await renderFolderView(ctx, user, user.current_node_id);
+        return;
+      }
+
       // State: UPLOADING (Batch File Upload)
       if (user.bot_state === "uploading") {
         if (text === "✅ إنهاء الحفظ" || text === "إنهاء الحفظ") {
@@ -945,7 +1619,7 @@ export default {
 
           const rootDept = user.current_node_id ? await getRootDepartment(user.current_node_id) : null;
 
-          await updateUserState(user.telegram_id, "browsing");
+          await updateUserState(user.telegram_id, "browsing", user.current_node_id, null, null);
           user.bot_state = "browsing";
 
           if (rootDept && user.current_node_id) {
@@ -966,7 +1640,7 @@ export default {
         }
 
         let fileId: string | null = null;
-        let fileName: string = "Unnamed File";
+        let fileName = "Unnamed File";
         let fileType: MaterialRow["file_type"] = "document";
         const caption = ctx.message.caption || null;
 
@@ -990,7 +1664,6 @@ export default {
         }
 
         if (fileId && user.current_node_id) {
-          // Auto backup to private channel
           let backupMsgId: number | null = null;
           const backupChannelId = await getBackupChannelId();
           if (backupChannelId) {
@@ -998,15 +1671,11 @@ export default {
               const res = await ctx.api.copyMessage(backupChannelId, ctx.chat.id, ctx.message.message_id, {
                 caption: `📄 الملف: ${fileName}`,
               });
-              if (res?.message_id) {
-                backupMsgId = res.message_id;
-              }
+              if (res?.message_id) backupMsgId = res.message_id;
             } catch (e) {
               try {
                 const res = await ctx.forwardMessage(backupChannelId);
-                if (res?.message_id) {
-                  backupMsgId = res.message_id;
-                }
+                if (res?.message_id) backupMsgId = res.message_id;
               } catch (err) {}
             }
           }
@@ -1021,45 +1690,42 @@ export default {
         }
       }
 
-      // State: RENAMING
+      // State: RENAMING (Guarded against reserved names and duplicates)
       if (user.bot_state === "renaming") {
-        if (text === "❌ إلغاء" || text === "⬅️ رجوع" || text === "🏠 الرئيسية" || text === "إلغاء") {
-          await updateUserState(user.telegram_id, "browsing", user.current_node_id, null);
-          user.bot_state = "browsing";
-          await ctx.reply("تم إلغاء التعديل والاحتفاظ بالاسم السابق.");
-          await renderFolderView(ctx, user, user.current_node_id);
-          return;
-        }
-
         if (text && user.managed_node_id) {
+          const check = await handleFolderCreateOrRename(user, text, true, user.managed_node_id);
+          if (!check.ok) {
+            await ctx.reply(check.errorMsg || "⚠️ اسم غير صالح.");
+            return;
+          }
+          const cleanTitle = check.cleanTitle!;
+
           const targetNode: NodeRow | null = await env.DB.prepare("SELECT * FROM nodes WHERE id = ?")
             .bind(user.managed_node_id)
             .first<NodeRow>();
           const oldTitle = targetNode?.title || "";
 
           await env.DB.prepare("UPDATE nodes SET title = ? WHERE id = ?")
-            .bind(text, user.managed_node_id)
+            .bind(cleanTitle, user.managed_node_id)
             .run();
 
-          await updateUserState(user.telegram_id, "browsing", user.current_node_id, null);
+          await updateUserState(user.telegram_id, "browsing", user.current_node_id, null, null);
           user.bot_state = "browsing";
-          await ctx.reply(`✅ تم تعديل الاسم بنجاح:\nمن: **${oldTitle}**\nإلى: **${text}**`, { parse_mode: "Markdown" });
+          await ctx.reply(`✅ تم تعديل الاسم بنجاح:\nمن: **${oldTitle}**\nإلى: **${cleanTitle}**`, { parse_mode: "Markdown" });
           await renderFolderView(ctx, user, user.current_node_id);
           return;
         }
       }
 
-      // State: AWAITING FOLDER NAME
+      // State: AWAITING FOLDER NAME (Guarded against reserved names and duplicates)
       if (user.bot_state === "awaiting_folder") {
-        if (text === "❌ إلغاء" || text === "⬅️ رجوع" || text === "🏠 الرئيسية" || text === "إلغاء") {
-          await updateUserState(user.telegram_id, "browsing");
-          user.bot_state = "browsing";
-          await ctx.reply("تم إلغاء الإضافة.");
-          await renderFolderView(ctx, user, user.current_node_id);
-          return;
-        }
-
         if (text) {
+          const check = await handleFolderCreateOrRename(user, text, false, null);
+          if (!check.ok) {
+            await ctx.reply(check.errorMsg || "⚠️ اسم غير صالح.");
+            return;
+          }
+          const cleanTitle = check.cleanTitle!;
           const isFull = user.current_node_id === null ? 1 : 0;
 
           let maxOrderRow: { max_val: number | null } | null;
@@ -1078,12 +1744,12 @@ export default {
           await env.DB.prepare(
             "INSERT INTO nodes (parent_id, title, created_by, is_full_width, sort_order) VALUES (?, ?, ?, ?, ?)"
           )
-            .bind(user.current_node_id, text, user.telegram_id, isFull, nextSortOrder)
+            .bind(user.current_node_id, cleanTitle, user.telegram_id, isFull, nextSortOrder)
             .run();
 
-          await updateUserState(user.telegram_id, "browsing");
+          await updateUserState(user.telegram_id, "browsing", user.current_node_id, null, null);
           user.bot_state = "browsing";
-          await ctx.reply(`✅ تم إنشاء الخانة الجديدة: **${text}**`, { parse_mode: "Markdown" });
+          await ctx.reply(`✅ تم إنشاء الخانة الجديدة: **${cleanTitle}**`, { parse_mode: "Markdown" });
           await renderFolderView(ctx, user, user.current_node_id);
           return;
         }
@@ -1106,7 +1772,7 @@ export default {
           .first<NodeRow>();
 
         const parentId = currentNode ? currentNode.parent_id : null;
-        await updateUserState(user.telegram_id, "browsing", parentId);
+        await updateUserState(user.telegram_id, "browsing", parentId, null, null);
         user.current_node_id = parentId;
         user.bot_state = "browsing";
         if (parentId === null && isPrivileged(user)) {
@@ -1117,7 +1783,7 @@ export default {
         return;
       }
 
-      // Feature: Download / Show All Content Recursively
+      // Feature: Download All Content Recursively
       if (text === "📦 عرض وتحميل كل المحتوى" && user.current_node_id) {
         const groups = await getAllDescendantMaterialsGrouped(user.current_node_id);
         if (groups.length === 0) {
@@ -1131,6 +1797,57 @@ export default {
         return;
       }
 
+      // Student Action: Crowdsource note contribution
+      if (text === "📝 ساهم بملخص أو امتحان" && user.current_node_id) {
+        const courseNode = await getCourseNode(user.current_node_id);
+        if (!courseNode) {
+          return ctx.reply("⚠️ يرجى الدخول لمادة دراسية أولاً للمساهمة فيها.");
+        }
+
+        await updateUserState(user.telegram_id, "awaiting_submission", user.current_node_id, null, courseNode.id);
+        user.bot_state = "awaiting_submission";
+        user.pending_target_id = courseNode.id;
+
+        const cancelKeyboard = new Keyboard().text("❌ إلغاء").resized();
+        await ctx.reply(
+          `📝 **مساهمة طلابية — [${courseNode.title}]:**\n\n` +
+            `أرسل الآن ملف الـ PDF، أو الصور، أو التلخيص لمشاركته مع زملائك.\n` +
+            `(يمكنك كتابة وصف مع الملف إن أحببت)\n\n` +
+            `⚠️ سيتم مراجعة الملف واعتماده من ليدر المادة قبل نشره للجميع.\n` +
+            `اضغط [❌ إلغاء] للتراجع.`,
+          { parse_mode: "Markdown", reply_markup: cancelKeyboard }
+        );
+        return;
+      }
+
+      // Leader Action: Add Weekly Task
+      if (text === "📅 إضافة تاسك للأسبوع" && (await canManage(user, user.current_node_id)) && user.current_node_id !== null) {
+        const rootDept = await getRootDepartment(user.current_node_id);
+        const courseNode = await getCourseNode(user.current_node_id);
+
+        if (!rootDept) {
+          return ctx.reply("⚠️ لا يمكن تحديد القسم التابع له هذا المجلد.");
+        }
+
+        const effectiveCourseId = courseNode ? courseNode.id : user.current_node_id;
+        const effectiveCourseTitle = courseNode ? courseNode.title : "المقرر";
+
+        await updateUserState(user.telegram_id, "awaiting_task_title", user.current_node_id, rootDept.id, effectiveCourseId);
+        user.bot_state = "awaiting_task_title";
+        user.managed_node_id = rootDept.id;
+        user.pending_target_id = effectiveCourseId;
+
+        const cancelKeyboard = new Keyboard().text("❌ إلغاء").resized();
+        await ctx.reply(
+          `📅 **إضافة تاسك/تكليف للأسبوع — [${effectiveCourseTitle}]:**\n\n` +
+            `✍️ أرسل الآن عنوان التاسك أو التكليف المطلوب:\n` +
+            `(مثال: "تسليم الشيت الثالث — مسائل الـ Syntax Analysis")\n\n` +
+            `اضغط [❌ إلغاء] للتراجع.`,
+          { parse_mode: "Markdown", reply_markup: cancelKeyboard }
+        );
+        return;
+      }
+
       // Admin Action: Manual Broadcast to Department
       if (text === "📢 إرسال إشعار للقسم" && (await canManage(user, user.current_node_id)) && user.current_node_id !== null) {
         const rootDept = await getRootDepartment(user.current_node_id);
@@ -1138,7 +1855,7 @@ export default {
           return ctx.reply("⚠️ لا يمكن تحديد القسم التابع له هذا المجلد.");
         }
 
-        await updateUserState(user.telegram_id, "awaiting_broadcast", user.current_node_id, rootDept.id);
+        await updateUserState(user.telegram_id, "awaiting_broadcast", user.current_node_id, rootDept.id, null);
         user.bot_state = "awaiting_broadcast";
         user.managed_node_id = rootDept.id;
 
@@ -1159,7 +1876,8 @@ export default {
         if (!user.current_node_id) {
           return ctx.reply("❌ لا يمكن رفع ملفات في الصفحة الرئيسية، يرجى الدخول لمادة أو خانة أولاً.");
         }
-        await updateUserState(user.telegram_id, "uploading");
+        await updateUserState(user.telegram_id, "uploading", user.current_node_id, null, null);
+        user.bot_state = "uploading";
         const uploadKeyboard = new Keyboard().text("✅ إنهاء الحفظ").resized();
         await ctx.reply(
           `📤 **وضع الرفع نشط الآن:**\n\nقم بإرسال أو تحويل (Forward) كل ملفات الـ PDF أو الفيديوهات أو الصور هنا دفعة واحدة.\n\nوعند الانتهاء اضغط زر **[✅ إنهاء الحفظ]**.`,
@@ -1170,7 +1888,8 @@ export default {
 
       // Admin Action: Add Node
       if ((text === "➕ إضافة خانة/مادة" || text === "➕ إضافة قسم جديد") && (await canManage(user, user.current_node_id))) {
-        await updateUserState(user.telegram_id, "awaiting_folder");
+        await updateUserState(user.telegram_id, "awaiting_folder", user.current_node_id, null, null);
+        user.bot_state = "awaiting_folder";
         const cancelKeyboard = new Keyboard().text("❌ إلغاء").resized();
         await ctx.reply("✍️ أرسل الآن اسم المادة أو الخانة الجديدة:", {
           reply_markup: cancelKeyboard,
@@ -1188,7 +1907,7 @@ export default {
         const inlineKeyboard = buildWidthCustomizationKeyboard(children, user.current_node_id !== null);
         await ctx.reply(
           `📐 **تخصيص العرض والصفوف للأزرار:**\n\n` +
-            `اضغط على أي زر لتغيير نمط عرضه محلياً بين (صف كامل ↔️ صف مزدوج).\n\n` +
+            `اضغط على أي زر لتغيير نمط عرضه محلياً بين (صف كامل 🔘 ↔️ صف مزدوج 👥).\n\n` +
             `أو اضغط خيارات التعميم لنقل التنسيق لباقي المواد.`,
           { parse_mode: "Markdown", reply_markup: inlineKeyboard }
         );
@@ -1283,7 +2002,7 @@ export default {
           }
 
           // Otherwise, navigate inside:
-          await updateUserState(user.telegram_id, "browsing", childNode.id);
+          await updateUserState(user.telegram_id, "browsing", childNode.id, null, null);
           user.current_node_id = childNode.id;
           await renderFolderView(ctx, user, childNode.id);
           return;
@@ -1300,7 +2019,13 @@ export default {
       const user = await getUser(ctx.from.id);
       const data = ctx.callbackQuery.data;
 
-      if (data === "close_admin" || data === "close_customization" || data === "close_rename") {
+      if (
+        data === "close_admin" ||
+        data === "close_customization" ||
+        data === "close_rename" ||
+        data === "close_tasks" ||
+        data === "close_sub_pick"
+      ) {
         await ctx.deleteMessage();
         return;
       }
@@ -1313,6 +2038,28 @@ export default {
 
       if (data === "close_notifications") {
         await ctx.deleteMessage();
+        return;
+      }
+
+      if (data === "open_notifications_from_tasks") {
+        await ctx.deleteMessage();
+        await renderNotificationSettings(ctx, user);
+        return;
+      }
+
+      // Download task attachment
+      if (data.startsWith("dl_task_")) {
+        const taskId = parseInt(data.replace("dl_task_", ""), 10);
+        const task = await env.DB.prepare("SELECT * FROM weekly_tasks WHERE id = ?").bind(taskId).first<WeeklyTaskRow>();
+        if (!task || !task.attachment_file_id) {
+          await ctx.answerCallbackQuery({ text: "لا يوجد ملف مرفق لهذا التاسك", show_alert: true });
+          return;
+        }
+
+        await ctx.answerCallbackQuery();
+        await ctx.replyWithDocument(task.attachment_file_id, {
+          caption: `📄 **ملف تكليف:** ${task.task_title}\n📌 مادة: ${task.course_title}`,
+        });
         return;
       }
 
@@ -1349,7 +2096,95 @@ export default {
         return;
       }
 
-      // One-click batch upload notification callback
+      // Silent moderation: Ignore submission (No notification sent to student)
+      if (data.startsWith("sub_ignore:")) {
+        const subId = parseInt(data.replace("sub_ignore:", ""), 10);
+        await env.DB.prepare("UPDATE submissions SET status = 'ignored' WHERE id = ?").bind(subId).run();
+        await ctx.deleteMessage().catch(() => {});
+        await ctx.answerCallbackQuery({ text: "🗑️ تم التجاهل والحذف بصمت." });
+        return;
+      }
+
+      // Moderation: Leader picks folder for approved submission
+      if (data.startsWith("sub_pick_folder:")) {
+        const subId = parseInt(data.replace("sub_pick_folder:", ""), 10);
+        const sub = await env.DB.prepare("SELECT * FROM submissions WHERE id = ?").bind(subId).first<SubmissionRow>();
+        if (!sub) {
+          await ctx.answerCallbackQuery({ text: "المساهمة غير موجودة", show_alert: true });
+          return;
+        }
+
+        const { results: folders } = await env.DB.prepare(
+          "SELECT id, title FROM nodes WHERE parent_id = ? ORDER BY sort_order ASC, id ASC"
+        ).bind(sub.course_node_id).all<{ id: number; title: string }>();
+
+        const kb = new InlineKeyboard();
+        for (const f of folders || []) {
+          kb.text(`📁 ${f.title}`, `sub_place:${subId}:${f.id}`).row();
+        }
+        kb.text("➕ إنشاء فولدر جديد هنا", `sub_new_folder:${subId}:${sub.course_node_id}`).row();
+        kb.text("❌ إلغاء", "close_sub_pick");
+
+        await ctx.editMessageReplyMarkup({ reply_markup: kb });
+        await ctx.answerCallbackQuery();
+        return;
+      }
+
+      // Moderation: Place approved submission in existing folder
+      if (data.startsWith("sub_place:")) {
+        const parts = data.replace("sub_place:", "").split(":");
+        const subId = parseInt(parts[0], 10);
+        const targetFolderId = parseInt(parts[1], 10);
+
+        const sub = await env.DB.prepare("SELECT * FROM submissions WHERE id = ?").bind(subId).first<SubmissionRow>();
+        if (!sub) {
+          await ctx.answerCallbackQuery({ text: "المساهمة غير موجودة" });
+          return;
+        }
+
+        const folderNode = await env.DB.prepare("SELECT title FROM nodes WHERE id = ?").bind(targetFolderId).first<{ title: string }>();
+
+        await env.DB.prepare(
+          `INSERT INTO materials (node_id, file_name, telegram_file_id, file_type, caption, uploaded_by, backup_message_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        )
+          .bind(targetFolderId, sub.file_name, sub.telegram_file_id, sub.file_type, sub.caption, sub.student_id, sub.backup_message_id)
+          .run();
+
+        await env.DB.prepare("UPDATE submissions SET status = 'approved' WHERE id = ?").bind(subId).run();
+
+        const successText = `✅ **تم اعتماد المساهمة ونشر الملف بنجاح في مجلد [${folderNode?.title || "المقرر"}]!**`;
+        try {
+          await ctx.editMessageCaption({ caption: successText, parse_mode: "Markdown" });
+        } catch {
+          await ctx.editMessageText(successText, { parse_mode: "Markdown" });
+        }
+        await ctx.answerCallbackQuery({ text: "✅ تم النشر في المجلد بنجاح!" });
+        return;
+      }
+
+      // Moderation: Leader wants to create a new folder for the submission
+      if (data.startsWith("sub_new_folder:")) {
+        const parts = data.replace("sub_new_folder:", "").split(":");
+        const subId = parseInt(parts[0], 10);
+        const courseId = parseInt(parts[1], 10);
+
+        await updateUserState(user.telegram_id, "awaiting_submission_folder", user.current_node_id, courseId, subId);
+        user.bot_state = "awaiting_submission_folder";
+        user.managed_node_id = courseId;
+        user.pending_target_id = subId;
+
+        await ctx.deleteMessage().catch(() => {});
+        const cancelKeyboard = new Keyboard().text("❌ إلغاء").resized();
+        await ctx.reply(
+          `📁 **إنشاء فولدر جديد للمساهمة:**\n\n` +
+            `✍️ أرسل الآن اسم الفولدر الجديد الذي ترغب في إنشائه ووضع هذا الملف بداخله (مثال: "ملخصات الطلاب"):`,
+          { parse_mode: "Markdown", reply_markup: cancelKeyboard }
+        );
+        return;
+      }
+
+      // Batch upload broadcast prompt callback
       if (data.startsWith("notify_new_materials_")) {
         const parts = data.replace("notify_new_materials_", "").split("_");
         const folderId = parseInt(parts[0], 10);
@@ -1375,8 +2210,8 @@ export default {
 
         const chatId = ctx.chat?.id || ctx.from.id;
         await env.DB.prepare(
-          `INSERT INTO broadcast_jobs (dept_node_id, dept_title, sender_id, from_chat_id, message_id, status)
-           VALUES (?, ?, ?, ?, ?, 'pending')`
+          `INSERT INTO broadcast_jobs (target_type, dept_node_id, dept_title, sender_id, from_chat_id, message_id, status)
+           VALUES ('department', ?, ?, ?, ?, ?, 'pending')`
         )
           .bind(deptId, deptTitle, user.telegram_id, chatId, announcementMsg.message_id)
           .run();
@@ -1400,6 +2235,57 @@ export default {
         return;
       }
 
+      // New weekly task broadcast prompt callback
+      if (data.startsWith("notify_new_task_")) {
+        const parts = data.replace("notify_new_task_", "").split("_");
+        const taskId = parseInt(parts[0], 10);
+        const deptId = parseInt(parts[1], 10);
+
+        const task = await env.DB.prepare("SELECT * FROM weekly_tasks WHERE id = ?").bind(taskId).first<WeeklyTaskRow>();
+        const deptNode = await env.DB.prepare("SELECT title FROM nodes WHERE id = ?").bind(deptId).first<{ title: string }>();
+        const deptTitle = deptNode?.title || "القسم";
+
+        if (!task) {
+          await ctx.answerCallbackQuery({ text: "التاسك غير موجود" });
+          return;
+        }
+
+        const taskAnnounceMsg = await ctx.reply(
+          `📅 **تاسك وتكليف جديد — [${deptTitle}]**\n\n` +
+            `📌 مادة: **${task.course_title}**\n` +
+            `📝 **${task.task_title}**\n` +
+            `⏰ الموعد النهائي: **${task.due_date}**\n\n` +
+            `افتح البوت واضغط زر **[📅 تاسكات الأسبوع]** للاطلاع والتحميل! 🚀`,
+          { parse_mode: "Markdown" }
+        );
+
+        const chatId = ctx.chat?.id || ctx.from.id;
+        await env.DB.prepare(
+          `INSERT INTO broadcast_jobs (target_type, dept_node_id, dept_title, sender_id, from_chat_id, message_id, status)
+           VALUES ('department', ?, ?, ?, ?, ?, 'pending')`
+        )
+          .bind(deptId, deptTitle, user.telegram_id, chatId, taskAnnounceMsg.message_id)
+          .run();
+
+        const subCount = await env.DB.prepare(
+          "SELECT COUNT(*) as count FROM users WHERE subscribed_dept_id = ? AND notifications_enabled = 1"
+        )
+          .bind(deptId)
+          .first<{ count: number }>();
+
+        await ctx.answerCallbackQuery({ text: "✅ تم جدولة إرسال التنبيه لطلاب القسم!" });
+
+        try {
+          await ctx.editMessageText(
+            `✅ **تم جدولة التنبيه بنجاح لطلاب قسم [${deptTitle}]** (${subCount?.count || 0} طالب).\nيجري الإرسال في الخلفية...`,
+            { parse_mode: "Markdown" }
+          );
+        } catch (e) {}
+
+        executionCtx.waitUntil(processBroadcastQueue(env));
+        return;
+      }
+
       // Admin panel callbacks (Super Admin only)
       if (data === "admin_back_to_panel") {
         if (user.role !== "super_admin") {
@@ -1407,6 +2293,34 @@ export default {
           return;
         }
         await renderAdminPanel(ctx);
+        return;
+      }
+
+      if (data === "admin_stats") {
+        if (user.role !== "super_admin") {
+          await ctx.answerCallbackQuery({ text: "❌ مخصص للمسؤول العام فقط", show_alert: true });
+          return;
+        }
+        await renderStats(ctx, user);
+        return;
+      }
+
+      if (data === "admin_notify_all_leaders") {
+        if (user.role !== "super_admin") {
+          await ctx.answerCallbackQuery({ text: "❌ مخصص للمسؤول العام فقط", show_alert: true });
+          return;
+        }
+        await updateUserState(user.telegram_id, "awaiting_admin_broadcast", user.current_node_id, null, null);
+        user.bot_state = "awaiting_admin_broadcast";
+        await ctx.deleteMessage().catch(() => {});
+        const cancelKeyboard = new Keyboard().text("❌ إلغاء").resized();
+        await ctx.reply(
+          `📢 **مراسلة جميع القادة والمشرفين:**\n\n` +
+            `✍️ أرسل الآن الرسالة أو المنشور المراد تعميمه على كافة الليدرز والمشرفين بالكلية.\n` +
+            `(يمكنك إرسال نص، صورة، أو فيديو)\n\n` +
+            `اضغط زر [❌ إلغاء] للتراجع.`,
+          { parse_mode: "Markdown", reply_markup: cancelKeyboard }
+        );
         return;
       }
 
@@ -1424,7 +2338,7 @@ export default {
           await ctx.answerCallbackQuery({ text: "❌ مخصص للمسؤول العام فقط", show_alert: true });
           return;
         }
-        await updateUserState(user.telegram_id, "awaiting_leader_id");
+        await updateUserState(user.telegram_id, "awaiting_leader_id", user.current_node_id, null, null);
         user.bot_state = "awaiting_leader_id";
         const cancelKeyboard = new Keyboard().text("❌ إلغاء").resized();
         await ctx.reply(
@@ -1578,7 +2492,9 @@ export default {
           .bind(nodeId)
           .first<NodeRow>();
 
-        await updateUserState(user.telegram_id, "renaming", user.current_node_id, nodeId);
+        await updateUserState(user.telegram_id, "renaming", user.current_node_id, nodeId, null);
+        user.bot_state = "renaming";
+        user.managed_node_id = nodeId;
         await ctx.deleteMessage();
 
         const cancelKeyboard = new Keyboard().text("❌ إلغاء").text("⬅️ رجوع").resized();

@@ -53,6 +53,24 @@
 - **إرسال تعميم يدوي لطلاب القسم:** زر `📢 إرسال إشعار للقسم` متاح للمشرفين والليدرز داخل أي مادة تابعة للقسم لإرسال تنبيهات هامة أو صور أو مستندات.
 - **تنبيه بضغطة زر بعد رفع الملفات:** فور إنهاء حفظ الملفات المرفوعة (`[✅ إنهاء الحفظ]`)، يقدم البوت زراً فورياً `[🔔 إرسال تنبيه لطلاب القسم بالملفات الجديدة]` لإشعار طلاب القسم تلقائياً.
 
+### 7. مساهمات الطلاب المراقبة بدون إحراج (Crowdsourced Notes) (v2.1)
+- **مشاركة الطالب بملخص أو امتحان:** داخل أي مادة، يظهر للطالب زر `[📝 ساهم بملخص أو امتحان]` لرفع الملفات والملخصات، مع رسالة شكر فورية لطيفة (`❤️ شكراً لمساهمتك الجميلة!`).
+- **لوحة مراجعة صامتة لليدر:** يصل الملف فوراً لشات ليدر المادة أو القسم ومعه زرّان: `[✅ قبول واختيار الفولدر]` و `[🗑️ تجاهل وحذف بصمت]`.
+- **حفظ مشاعر الطلاب (Zero Embarrassment):** في حال الرفض والتجاهل، يُحذف الكارت بهدوء دون إشعار الطالب بأي رفض، وفي حال القبول يختار الليدر إدراجه في فولدر قائم أو إنشاء فولدر جديد بنقرة واحدة.
+
+### 8. تاسكات وتسليمات الأسبوع وحذف المواعيد تلقائياً (v2.1)
+- **لوحة متابعة الطالب:** زر رئيسي `[📅 تاسكات وتسليمات الأسبوع الحالي]` أو عبر الأمر `/tasks` يعرض كروت الشيتات والأسايمنتات المطلوبة خلال 7 أيام مرتبة بالأقرب موعداً.
+- **تحميل الشيت بضغطة زر:** زر مرفق مع كل تاسك لتحميل ملف التكليف أو الشيت مباشرة.
+- **التنظيف التلقائي الذكي:** بمجرد انقضاء موعد التسليم (`due_date < now`) يختفي التاسك تلقائياً دون الحاجة لحذفه يدوياً.
+- **نشر سريع لليدرز:** زر `[📅 إضافة تاسك للأسبوع]` لإدخال التكليف، وموعد التسليم، وإرفاق ملف الشيت في ثوانٍ مع خيار تعميمه فوراً لطلاب القسم.
+
+### 9. لوحة الإحصائيات المزدوجة (Dual Analytics Dashboard) (v2.1)
+- **شاشة السوبر أدمن الشاملة:** عبر الأمر `/stats` أو لوحة التحكم، تعرض أعداد الطلاب ونسب اشتراكهم بكل قسم، ورصد تلقائي لـ **"المواد الفارغة"** التي لم يرفع فيها الليدرات ملفات حتى الآن لمتابعتها قبل الامتحانات.
+- **شاشة الليدر المخصصة:** تعرض لليدر إحصائيات قسمه فقط: عدد المشتركين في الإشعارات، وتاسكات الأسبوع، وعدد المساهمات الطلابية المعلقة بانتظار المراجعة.
+
+### 10. حماية كاملة ضد أخطاء تسمية وتكرار الأزرار (Safe State Guard) (v2.1)
+- نظام حماية ثلاثي يمنع تحول اسم أي مادة إلى كلمات التنقل مثل "رجوع" أو "إلغاء"، مع كشف ومنع تكرار المجلدات في نفس المستوى.
+
 ---
 
 ## 🏗️ البنية التقنية (System Architecture)
@@ -71,6 +89,8 @@
                      |  - Role-Based Access Control (RBAC)   |
                      |  - Instant Optimistic UI Handlers     |
                      |  - Scheduled Broadcast Queue Worker   |
+                     |  - Crowdsource Moderation Flow        |
+                     |  - Tasks Deadlines Auto-Cleaner       |
                      +---------+-------------------+---------+
                                |                   |
             Fast SQL Queries   |                   | Telegram API Calls
@@ -81,8 +101,10 @@
             | - users              |     | - Backup Archive Channel   |
             | - nodes              |     | - Media Groups Delivery    |
             | - materials          |     | - Safe copyMessage Queue   |
-            | - user_permissions   |     +----------------------------+
-            | - broadcast_jobs     |
+            | - user_permissions   |     | - Student Submissions      |
+            | - broadcast_jobs     |     +----------------------------+
+            | - submissions        |
+            | - weekly_tasks       |
             | - settings           |
             +----------------------+
 ```
@@ -99,10 +121,11 @@ CREATE TABLE users (
   role TEXT DEFAULT 'student',            -- 'student' | 'leader' | 'super_admin'
   managed_node_id INTEGER DEFAULT NULL,  
   current_node_id INTEGER DEFAULT NULL,  -- معرف المجلد الحالي للتنقل الدقيق
-  bot_state TEXT DEFAULT 'browsing',     -- 'browsing' | 'awaiting_folder' | 'uploading' | 'renaming' | 'awaiting_leader_id' | 'awaiting_broadcast'
+  bot_state TEXT DEFAULT 'browsing',     -- 'browsing' | 'awaiting_folder' | 'uploading' | 'renaming' | 'awaiting_leader_id' | 'awaiting_broadcast' | 'awaiting_admin_broadcast' | 'awaiting_submission' | 'awaiting_task_title'
   view_mode TEXT DEFAULT 'admin',        -- 'admin' | 'student'
   subscribed_dept_id INTEGER DEFAULT NULL,-- معرّف القسم المشترك به الطالب
-  notifications_enabled INTEGER DEFAULT 1 -- 1: مفعلة | 0: مكتومة / محظورة
+  notifications_enabled INTEGER DEFAULT 1,-- 1: مفعلة | 0: مكتومة / محظورة
+  pending_target_id INTEGER DEFAULT NULL  -- مؤشر مؤقت للعمليات متعددة الخطوات
 );
 
 -- 2. الشجرة الهرمية للأقسام والمواد (Hierarchy Tree)
@@ -140,7 +163,8 @@ CREATE TABLE user_permissions (
 -- 5. طابور مهام الإشعارات المجدولة (Broadcast Queue)
 CREATE TABLE broadcast_jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  dept_node_id INTEGER NOT NULL,
+  target_type TEXT NOT NULL DEFAULT 'department', -- 'department' | 'all_admins'
+  dept_node_id INTEGER DEFAULT NULL,
   dept_title TEXT NOT NULL,
   sender_id INTEGER NOT NULL,
   from_chat_id INTEGER NOT NULL,
@@ -152,7 +176,36 @@ CREATE TABLE broadcast_jobs (
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
--- 6. إعدادات النظام (Settings)
+-- 6. جدول مساهمات الطلاب المراقبة (Crowdsourced Notes)
+CREATE TABLE submissions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  course_node_id INTEGER NOT NULL,        -- المادة التي ساهم فيها الطالب
+  student_id INTEGER NOT NULL,
+  student_name TEXT,
+  file_name TEXT NOT NULL,
+  telegram_file_id TEXT NOT NULL,
+  file_type TEXT NOT NULL,                -- 'document' | 'photo' | 'video'
+  caption TEXT DEFAULT NULL,
+  backup_message_id INTEGER DEFAULT NULL,
+  status TEXT DEFAULT 'pending',          -- 'pending' | 'approved' | 'ignored'
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (course_node_id) REFERENCES nodes(id) ON DELETE CASCADE
+);
+
+-- 7. جدول تاسكات وتسليمات الأسبوع (Weekly Tasks)
+CREATE TABLE weekly_tasks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  dept_node_id INTEGER NOT NULL,          -- معرف القسم الأكاديمي
+  course_title TEXT NOT NULL,
+  task_title TEXT NOT NULL,
+  due_date DATETIME NOT NULL,             -- إخفاء تلقائي بعد انتهاء الموعد
+  attachment_file_id TEXT DEFAULT NULL,
+  created_by INTEGER,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (dept_node_id) REFERENCES nodes(id) ON DELETE CASCADE
+);
+
+-- 8. إعدادات النظام (Settings)
 CREATE TABLE settings (
   key TEXT PRIMARY KEY,
   value TEXT
@@ -162,6 +215,8 @@ CREATE INDEX idx_nodes_parent_order ON nodes(parent_id, sort_order);
 CREATE INDEX idx_materials_node ON materials(node_id);
 CREATE INDEX idx_users_sub ON users(subscribed_dept_id, notifications_enabled, telegram_id);
 CREATE INDEX idx_broadcast_status ON broadcast_jobs(status, id);
+CREATE INDEX idx_submissions_course ON submissions(course_node_id, status);
+CREATE INDEX idx_tasks_dept_due ON weekly_tasks(dept_node_id, due_date);
 ```
 
 ---
@@ -244,9 +299,12 @@ https://api.telegram.org/bot<YOUR_BOT_TOKEN>/setWebhook?url=https://faculty-tele
 | الأمر | الوظيفة | الصلاحية |
 | :--- | :--- | :--- |
 | `/start` | 🏠 فتح القائمة الرئيسية واختيار وضع الدخول (طالب / مشرف) | متاح للجميع |
+| `/tasks` | 📅 عرض تاسكات وتسليمات الأسبوع وتنزيل الشيتات | متاح للجميع |
 | `/notifications` | 🔔 إعدادات الإشعارات وتحديد واشتراك القسم الأكاديمي | متاح للجميع |
 | `/id` | 🆔 عرض ونسخ الـ Telegram ID الخاص بالمستخدم | متاح للجميع |
 | `/admin` | 👑 فتح لوحة تحكم المسؤول العام (قناة الأرشيف، حالة النظام) | المسؤول العام فقط 🔒 |
+| `/stats` | 📊 لوحة الإحصائيات الشاملة وتحليل المواد الفارغة | المسؤول العام والليدرز 🔒 |
+| `/notify_admins` | 📢 مراسلة وتعميم فوري لكافة القادة والمشرفين بالكلية | المسؤول العام فقط 🔒 |
 | `/leaders` | 👥 عرض قائمة الليدرز وتعديل أو سحب صلاحيات الأقسام | المسؤول العام فقط 🔒 |
 | `/promote <ID>` | ➕ ترقية مستخدم إلى رتبة ليدر وتعيين أقسامه مباشرة | المسؤول العام فقط 🔒 |
 | `/demote <ID>` | 🗑️ سحب رتبة الليدر والصلاحيات من مستخدم | المسؤول العام فقط 🔒 |

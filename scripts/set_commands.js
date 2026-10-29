@@ -31,6 +31,7 @@ async function main() {
   const resDefault = await sendPost({
     commands: [
       { command: "start", description: "🏠 القائمة الرئيسية وتصفح المواد" },
+      { command: "tasks", description: "📅 تاسكات وتسليمات الأسبوع الحالي" },
       { command: "notifications", description: "🔔 إعدادات الإشعارات واشتراك القسم" },
       { command: "id", description: "🆔 معرفة Telegram ID الخاص بك" },
     ],
@@ -43,9 +44,13 @@ async function main() {
     commands: [
       { command: "start", description: "🏠 القائمة الرئيسية وتبديل الوضع" },
       { command: "admin", description: "👑 لوحة تحكم المسؤول العام" },
+      { command: "stats", description: "📊 إحصائيات النظام الشاملة" },
+      { command: "notify_admins", description: "📢 مراسلة جميع القادة والمشرفين" },
       { command: "leaders", description: "👥 إدارة الليدرز وتحديد الأقسام" },
       { command: "promote", description: "➕ ترقية ليدر وتعيين أقسامه" },
       { command: "demote", description: "🗑️ سحب رتبة الليدر والصلاحيات" },
+      { command: "tasks", description: "📅 تاسكات وتسليمات الأسبوع الحالي" },
+      { command: "notifications", description: "🔔 إعدادات الإشعارات واشتراك القسم" },
       { command: "id", description: "🆔 معرفة Telegram ID الخاص بك" },
     ],
     scope: { type: "chat", chat_id: superAdminId },
