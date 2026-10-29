@@ -1153,23 +1153,24 @@ export default {
 
     bot.on("message", async (ctx) => {
       const user = await getUser(ctx.from!.id, ctx.from!.first_name);
-      const text = ctx.message.text?.trim();
+      const text = ctx.message.text?.trim() || "";
 
       // Priority 1: Navigation & Cancellation Guard (Prevents state corruption)
+      const hasText = Boolean(ctx.message.text);
       const isNavCancel =
-        !text ||
-        text.includes("إلغاء") ||
-        text.includes("رجوع") ||
-        text.includes("الرئيسية") ||
-        text.includes("تبديل الوضع") ||
-        (text.startsWith("/") && !text.startsWith("/promote") && !text.startsWith("/demote"));
+        hasText &&
+        (text.includes("إلغاء") ||
+          text.includes("رجوع") ||
+          text.includes("الرئيسية") ||
+          text.includes("تبديل الوضع") ||
+          (text.startsWith("/") && !text.startsWith("/promote") && !text.startsWith("/demote")));
 
       if (isNavCancel && user.bot_state !== "browsing") {
         await updateUserState(user.telegram_id, "browsing", user.current_node_id, null, null);
         user.bot_state = "browsing";
         user.managed_node_id = null;
         user.pending_target_id = null;
-        if (!text || !text.startsWith("/")) {
+        if (!text.startsWith("/")) {
           await ctx.reply("تم الإلغاء والعودة إلى وضع التصفح.");
           await renderFolderView(ctx, user, user.current_node_id);
           return;
@@ -1348,7 +1349,7 @@ export default {
 
         let fileId: string | null = null;
         let fileName = "ملخص طالب";
-        let fileType: "document" | "photo" | "video" = "document";
+        let fileType: "document" | "photo" | "video" | "audio" = "document";
         const caption = ctx.message.caption || null;
 
         if (ctx.message.document) {
@@ -1364,10 +1365,14 @@ export default {
           fileId = ctx.message.video.file_id;
           fileName = ctx.message.video.file_name || "فيديو_مساهمة.mp4";
           fileType = "video";
+        } else if (ctx.message.audio) {
+          fileId = ctx.message.audio.file_id;
+          fileName = ctx.message.audio.file_name || "تسجيل_مساهمة.mp3";
+          fileType = "audio";
         }
 
         if (!fileId) {
-          await ctx.reply("⚠️ يرجى إرسال ملف PDF، صورة، أو فيديو للمساهمة بها، أو اضغط [❌ إلغاء].");
+          await ctx.reply("⚠️ يرجى إرسال ملف PDF، صورة، فيديو، أو تسجيل صوتي للمساهمة به، أو اضغط [❌ إلغاء].");
           return;
         }
 
@@ -1391,7 +1396,7 @@ export default {
           { parse_mode: "Markdown" }
         );
 
-        // Notify course leader(s)
+        // Notify course leader(s) and super admin
         if (subRes?.id) {
           const subId = subRes.id;
           executionCtx.waitUntil((async () => {
@@ -1406,8 +1411,11 @@ export default {
                 leaderIds = (lRes || []).map((l) => l.telegram_id);
               }
 
-              if (leaderIds.length === 0 && env.SUPER_ADMIN_ID) {
-                leaderIds = [parseInt(env.SUPER_ADMIN_ID, 10)];
+              if (env.SUPER_ADMIN_ID) {
+                const saId = parseInt(env.SUPER_ADMIN_ID, 10);
+                if (!leaderIds.includes(saId)) {
+                  leaderIds.push(saId);
+                }
               }
 
               const modCardText =
@@ -1429,6 +1437,8 @@ export default {
                     await bot.api.sendPhoto(lid, fileId!, { caption: modCardText, parse_mode: "Markdown", reply_markup: modKb });
                   } else if (fileType === "video") {
                     await bot.api.sendVideo(lid, fileId!, { caption: modCardText, parse_mode: "Markdown", reply_markup: modKb });
+                  } else if (fileType === "audio") {
+                    await bot.api.sendAudio(lid, fileId!, { caption: modCardText, parse_mode: "Markdown", reply_markup: modKb });
                   } else {
                     await bot.api.sendDocument(lid, fileId!, { caption: modCardText, parse_mode: "Markdown", reply_markup: modKb });
                   }
@@ -1490,6 +1500,15 @@ export default {
             .run();
 
           await env.DB.prepare("UPDATE submissions SET status = 'approved' WHERE id = ?").bind(subId).run();
+
+          // Notify student of approval
+          try {
+            await bot.api.sendMessage(
+              sub.student_id,
+              `🎉 **بشرى سارة يا بطل!**\n\nتم اعتماد ونشر مساهمتك (${sub.file_name}) بمجلد جديد **[${cleanTitle}]**.\n\nشكراً لمساعدة زملائك ودعمك للدفعة! ❤️`,
+              { parse_mode: "Markdown" }
+            );
+          } catch (e) {}
         }
 
         await updateUserState(user.telegram_id, "browsing", user.current_node_id, null, null);
@@ -2158,6 +2177,7 @@ export default {
         }
 
         const folderNode = await env.DB.prepare("SELECT title FROM nodes WHERE id = ?").bind(targetFolderId).first<{ title: string }>();
+        const courseNode = await env.DB.prepare("SELECT title FROM nodes WHERE id = ?").bind(sub.course_node_id).first<{ title: string }>();
 
         await env.DB.prepare(
           `INSERT INTO materials (node_id, file_name, telegram_file_id, file_type, caption, uploaded_by, backup_message_id)
@@ -2167,6 +2187,15 @@ export default {
           .run();
 
         await env.DB.prepare("UPDATE submissions SET status = 'approved' WHERE id = ?").bind(subId).run();
+
+        // Notify student of approval
+        try {
+          await bot.api.sendMessage(
+            sub.student_id,
+            `🎉 **بشرى سارة يا بطل!**\n\nتم اعتماد ونشر مساهمتك (${sub.file_name}) في مادة **${courseNode?.title || "المقرر"}** بمجلد **[${folderNode?.title || "المقرر"}]**.\n\nشكراً لمساعدة زملائك ودعمك للدفعة! ❤️`,
+            { parse_mode: "Markdown" }
+          );
+        } catch (e) {}
 
         const successText = `✅ **تم اعتماد المساهمة ونشر الملف بنجاح في مجلد [${folderNode?.title || "المقرر"}]!**`;
         try {
