@@ -236,6 +236,10 @@ export default {
 
     const bot = new Bot(env.BOT_TOKEN);
 
+    bot.catch((err) => {
+      console.error("Unhandled bot error:", err);
+    });
+
     // ================= HELPER FUNCTIONS =================
 
     let cachedBackupChannelId: string | null = null;
@@ -622,7 +626,12 @@ export default {
 
         let emptySection = "";
         if (emptyCourses.length > 0) {
-          emptySection = `⚠️ **المواد الفارغة (بدون أي ملفات حتى الآن):**\n` + emptyCourses.map(e => `• ${e}`).join("\n");
+          const displayed = emptyCourses.slice(0, 15);
+          const remaining = emptyCourses.length - displayed.length;
+          emptySection =
+            `⚠️ **المواد الفارغة (بدون أي ملفات حتى الآن - ${emptyCourses.length} مادة):**\n` +
+            displayed.map((e) => `• ${e}`).join("\n") +
+            (remaining > 0 ? `\n• ...وغيرها (${remaining} مادة أخرى)` : "");
         } else {
           emptySection = `🎉 **رائع! جميع المواد تم رفع محتوى بداخلها.**`;
         }
@@ -903,6 +912,11 @@ export default {
 
     bot.command("start", async (ctx) => {
       const user = await getUser(ctx.from!.id, ctx.from!.first_name);
+      await updateUserState(user.telegram_id, "browsing", null, null, null);
+      user.bot_state = "browsing";
+      user.current_node_id = null;
+      user.managed_node_id = null;
+      user.pending_target_id = null;
       await renderTopLevel(ctx, user);
     });
 
@@ -911,12 +925,12 @@ export default {
       await renderNotificationSettings(ctx, user);
     });
 
-    bot.command(["tasks", "deadlines"], async (ctx) => {
+    bot.command(["tasks", "deadlines", "task"], async (ctx) => {
       const user = await getUser(ctx.from!.id, ctx.from!.first_name);
       await renderWeeklyTasks(ctx, user);
     });
 
-    bot.command("stats", async (ctx) => {
+    bot.command(["stats", "status", "stat"], async (ctx) => {
       const user = await getUser(ctx.from!.id, ctx.from!.first_name);
       await renderStats(ctx, user);
     });
@@ -1143,22 +1157,23 @@ export default {
 
       // Priority 1: Navigation & Cancellation Guard (Prevents state corruption)
       const isNavCancel =
-        text === "❌ إلغاء" ||
-        text === "⬅️ رجوع" ||
-        text === "🏠 الرئيسية" ||
-        text === "🏠 تبديل الوضع" ||
-        text === "إلغاء" ||
-        text === "رجوع" ||
-        (text && text.startsWith("/") && text !== "/start" && !text.startsWith("/promote") && !text.startsWith("/demote"));
+        !text ||
+        text.includes("إلغاء") ||
+        text.includes("رجوع") ||
+        text.includes("الرئيسية") ||
+        text.includes("تبديل الوضع") ||
+        (text.startsWith("/") && !text.startsWith("/promote") && !text.startsWith("/demote"));
 
       if (isNavCancel && user.bot_state !== "browsing") {
         await updateUserState(user.telegram_id, "browsing", user.current_node_id, null, null);
         user.bot_state = "browsing";
         user.managed_node_id = null;
         user.pending_target_id = null;
-        await ctx.reply("تم الإلغاء والعودة إلى وضع التصفح.");
-        await renderFolderView(ctx, user, user.current_node_id);
-        return;
+        if (!text || !text.startsWith("/")) {
+          await ctx.reply("تم الإلغاء والعودة إلى وضع التصفح.");
+          await renderFolderView(ctx, user, user.current_node_id);
+          return;
+        }
       }
 
       // Notification settings menu trigger
@@ -1296,7 +1311,7 @@ export default {
       if (user.bot_state === "awaiting_admin_broadcast") {
         await env.DB.prepare(
           `INSERT INTO broadcast_jobs (target_type, dept_node_id, dept_title, sender_id, from_chat_id, message_id, status)
-           VALUES ('all_admins', 0, 'جميع القادة والمشرفين', ?, ?, ?, 'pending')`
+           VALUES ('all_admins', NULL, 'جميع القادة والمشرفين', ?, ?, ?, 'pending')`
         )
           .bind(user.telegram_id, ctx.chat.id, ctx.message.message_id)
           .run();
