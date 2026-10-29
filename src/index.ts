@@ -339,7 +339,7 @@ export default {
       return user.role === "super_admin" || user.role === "leader";
     }
 
-    async function getNodeHierarchy(nodeId: number): Promise<{ rootDept: NodeRow | null; courseNode: NodeRow | null; breadcrumb: string }> {
+    async function getNodeHierarchy(nodeId: number): Promise<{ rootDept: NodeRow | null; semesterNode: NodeRow | null; courseNode: NodeRow | null; depth: number; breadcrumb: string }> {
       const { results: ancestors } = await env.DB.prepare(
         `WITH RECURSIVE node_path(id, parent_id, title, sort_order, created_by, is_full_width, depth) AS (
           SELECT id, parent_id, title, sort_order, created_by, is_full_width, 0 FROM nodes WHERE id = ?
@@ -350,11 +350,13 @@ export default {
         SELECT * FROM node_path ORDER BY depth DESC`
       ).bind(nodeId).all<NodeRow & { depth: number }>();
 
-      if (!ancestors || ancestors.length === 0) return { rootDept: null, courseNode: null, breadcrumb: "" };
+      if (!ancestors || ancestors.length === 0) return { rootDept: null, semesterNode: null, courseNode: null, depth: 0, breadcrumb: "" };
       const rootDept = ancestors[0] || null;
+      const semesterNode = ancestors.length >= 2 ? ancestors[1] : null;
       const courseNode = ancestors.length >= 3 ? ancestors[2] : null;
+      const depth = ancestors.length;
       const breadcrumb = ancestors.map((a) => a.title).join(" ⬅️ ");
-      return { rootDept, courseNode, breadcrumb };
+      return { rootDept, semesterNode, courseNode, depth, breadcrumb };
     }
 
     async function handleFolderCreateOrRename(
@@ -443,6 +445,49 @@ export default {
         }
       }
       return result;
+    }
+
+    async function backupSubmissionToChannel(
+      sub: SubmissionRow,
+      targetFolderTitle: string
+    ): Promise<number | null> {
+      const backupChannelId = getBackupChannelId();
+      if (!backupChannelId) return null;
+
+      const backupCaption =
+        `📄 **مساهمة طلابية معتمدة:** ${sub.file_name}\n` +
+        `📂 **المجلد:** ${targetFolderTitle}\n` +
+        `👤 **الطالب:** ${sub.student_name || "طالب"} (\`${sub.student_id}\`)\n` +
+        (sub.caption ? `📝 **الوصف:** ${sub.caption}` : "");
+
+      try {
+        let res: any = null;
+        if (sub.file_type === "photo") {
+          res = await bot.api.sendPhoto(backupChannelId, sub.telegram_file_id, {
+            caption: backupCaption,
+            parse_mode: "Markdown",
+          });
+        } else if (sub.file_type === "video") {
+          res = await bot.api.sendVideo(backupChannelId, sub.telegram_file_id, {
+            caption: backupCaption,
+            parse_mode: "Markdown",
+          });
+        } else if (sub.file_type === "audio") {
+          res = await bot.api.sendAudio(backupChannelId, sub.telegram_file_id, {
+            caption: backupCaption,
+            parse_mode: "Markdown",
+          });
+        } else {
+          res = await bot.api.sendDocument(backupChannelId, sub.telegram_file_id, {
+            caption: backupCaption,
+            parse_mode: "Markdown",
+          });
+        }
+        return res?.message_id || null;
+      } catch (err) {
+        console.error("Failed to backup submission to channel:", err);
+        return null;
+      }
     }
 
     // ================= RECURSIVE INLINE TREE BROWSER FOR SUBMISSIONS =================
@@ -778,6 +823,7 @@ export default {
           .text(myDept.title)
           .row()
           .text(`🔔 الإشعارات: ${notifStatus}`)
+          .row()
           .text("🔄 تغيير القسم")
           .row();
 
@@ -796,17 +842,16 @@ export default {
       const [children, materials, hierarchy] = await Promise.all([
         getChildNodes(nodeId),
         nodeId ? getNodeMaterials(nodeId) : Promise.resolve([]),
-        nodeId ? getNodeHierarchy(nodeId) : Promise.resolve({ rootDept: null, courseNode: null, breadcrumb: "" }),
+        nodeId ? getNodeHierarchy(nodeId) : Promise.resolve({ rootDept: null, semesterNode: null, courseNode: null, depth: 0, breadcrumb: "" }),
       ]);
 
       const { rootDept, courseNode } = hierarchy;
-      const isInsideRootDept = nodeId !== null && rootDept?.id === nodeId;
 
       const keyboard = new Keyboard();
       keyboard.resized();
 
-      // TOP BAR INSIDE STUDENT'S DEPARTMENT: Weekly Tasks & Deadlines at the very top
-      if (nodeId !== null && (isInsideRootDept || courseNode !== null)) {
+      // Weekly Tasks & Deadlines ONLY inside Semester view (depth === 2, where term courses are listed), as the very first button
+      if (nodeId !== null && hierarchy.depth === 2) {
         keyboard.text("📅 تاسكات وتسليمات الأسبوع الحالي").row();
       }
 
@@ -849,7 +894,8 @@ export default {
         keyboard.text("📥 إرسال الملفات").row();
       }
 
-      if (!isManager && courseNode !== null) {
+      // Student Contribution button: ONLY on the Course level (where sections like المحاضرات, السكاشن, الملخصات are listed)
+      if (!isManager && courseNode !== null && nodeId === courseNode.id) {
         keyboard.text("📝 ساهم بملخص أو امتحان").row();
       }
 
@@ -1605,11 +1651,13 @@ export default {
 
         let insertedMatId = 0;
         if (newFolder?.id) {
+          const backupMsgId = await backupSubmissionToChannel(sub, cleanTitle);
+
           const matInsert = await env.DB.prepare(
-            `INSERT INTO materials (node_id, file_name, telegram_file_id, file_type, caption, uploaded_by)
-             VALUES (?, ?, ?, ?, ?, ?) RETURNING id`
+            `INSERT INTO materials (node_id, file_name, telegram_file_id, file_type, caption, uploaded_by, backup_message_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id`
           )
-            .bind(newFolder.id, sub.file_name, sub.telegram_file_id, sub.file_type, sub.caption, sub.student_id)
+            .bind(newFolder.id, sub.file_name, sub.telegram_file_id, sub.file_type, sub.caption, sub.student_id, backupMsgId)
             .first<{ id: number }>();
           insertedMatId = matInsert?.id || 0;
 
@@ -2320,12 +2368,14 @@ export default {
         }
 
         const { breadcrumb } = await getNodeHierarchy(targetFolderId);
+        const targetNode = await env.DB.prepare("SELECT title FROM nodes WHERE id = ?").bind(targetFolderId).first<{ title: string }>();
+        const backupMsgId = await backupSubmissionToChannel(sub, targetNode?.title || "مجلد");
 
         const matInsert = await env.DB.prepare(
           `INSERT INTO materials (node_id, file_name, telegram_file_id, file_type, caption, uploaded_by, backup_message_id)
            VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id`
         )
-          .bind(targetFolderId, sub.file_name, sub.telegram_file_id, sub.file_type, sub.caption, sub.student_id, sub.backup_message_id)
+          .bind(targetFolderId, sub.file_name, sub.telegram_file_id, sub.file_type, sub.caption, sub.student_id, backupMsgId)
           .first<{ id: number }>();
 
         const insertedMatId = matInsert?.id || 0;
@@ -2358,7 +2408,11 @@ export default {
         const createdFolderId = parseInt(parts[2], 10);
 
         if (matId > 0) {
-          await env.DB.prepare("DELETE FROM materials WHERE id = ?").bind(matId).run();
+          const deleted = await env.DB.prepare("DELETE FROM materials WHERE id = ? RETURNING backup_message_id").bind(matId).first<{ backup_message_id: number | null }>();
+          const backupChannelId = getBackupChannelId();
+          if (backupChannelId && deleted?.backup_message_id) {
+            await bot.api.deleteMessage(backupChannelId, deleted.backup_message_id).catch(() => {});
+          }
         }
         if (createdFolderId > 0) {
           await env.DB.prepare("DELETE FROM nodes WHERE id = ?").bind(createdFolderId).run();
@@ -2382,7 +2436,11 @@ export default {
         const createdFolderId = parseInt(parts[2], 10);
 
         if (matId > 0) {
-          await env.DB.prepare("DELETE FROM materials WHERE id = ?").bind(matId).run();
+          const deleted = await env.DB.prepare("DELETE FROM materials WHERE id = ? RETURNING backup_message_id").bind(matId).first<{ backup_message_id: number | null }>();
+          const backupChannelId = getBackupChannelId();
+          if (backupChannelId && deleted?.backup_message_id) {
+            await bot.api.deleteMessage(backupChannelId, deleted.backup_message_id).catch(() => {});
+          }
         }
         if (createdFolderId > 0) {
           await env.DB.prepare("DELETE FROM nodes WHERE id = ?").bind(createdFolderId).run();
