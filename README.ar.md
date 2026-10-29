@@ -46,6 +46,13 @@
 - **تخصيص العرض والصفوف:** تعديل أزرار القائمة محلياً (صف عريض 🔘 ↔️ صف مزدوج 👥) مع ميزة تعميم التنسيق على باقي مواد القسم أو كل مواد الكلية.
 - **تجميع المحتوى بضغطة زر (Download All):** زر `📦 عرض وتحميل كل المحتوى` لتجميع وتحميل جميع محاضرات أو سكاشن المادة دفعة واحدة بنقرة واحدة.
 
+### 6. نظام الإشعارات والتنبيهات المجدولة للأقسام (v2.0)
+- **اشتراك الطالب في قسمه الأكاديمي:** زر دائم في شاشة البداية (`🔔 إعدادات الإشعارات واشتراك القسم` أو عبر الأمر `/notifications`) يتيح للطالب اختيار قسمه وتفعيل أو كتم التنبيهات بمرونة تامة.
+- **طابور إرسال آمن ومجدول (Safe Chunked Broadcast Queue):** جدولة الإشعارات عبر جدول `broadcast_jobs` وتنفيذها في الخلفية بواسطة Cloudflare Cron Trigger (`* * * * *`) بدفعات سعة 35 طالباً كل دقيقة، مما يضمن الالتزام التام بالحد المجاني لكلاودفلير (50 Subrequest) وتفادي حظر معدل الإرسال في تيليجرام.
+- **الكتم التلقائي للحسابات المحظورة (Auto-Mute on 403):** معالجة ذكية لأخطاء تيليجرام 403 عند قيام طالب بحظر البوت أو حذف الحساب، حيث يقوم النظام بكتم إشعاراته تلقائياً لعدم استهلاك رصيد الوركر.
+- **إرسال تعميم يدوي لطلاب القسم:** زر `📢 إرسال إشعار للقسم` متاح للمشرفين والليدرز داخل أي مادة تابعة للقسم لإرسال تنبيهات هامة أو صور أو مستندات.
+- **تنبيه بضغطة زر بعد رفع الملفات:** فور إنهاء حفظ الملفات المرفوعة (`[✅ إنهاء الحفظ]`)، يقدم البوت زراً فورياً `[🔔 إرسال تنبيه لطلاب القسم بالملفات الجديدة]` لإشعار طلاب القسم تلقائياً.
+
 ---
 
 ## 🏗️ البنية التقنية (System Architecture)
@@ -55,7 +62,7 @@
                      |         Telegram Messenger            |
                      |  Students / Leaders / Super Admin     |
                      +-------------------+-------------------+
-                                         |  HTTPS Webhook
+                                         |  HTTPS Webhook & Cron (* * * * *)
                                          v
                      +---------------------------------------+
                      |       Cloudflare Workers (Edge)       |
@@ -63,6 +70,7 @@
                      |  - Routing & Navigation State Machine |
                      |  - Role-Based Access Control (RBAC)   |
                      |  - Instant Optimistic UI Handlers     |
+                     |  - Scheduled Broadcast Queue Worker   |
                      +---------+-------------------+---------+
                                |                   |
             Fast SQL Queries   |                   | Telegram API Calls
@@ -72,8 +80,9 @@
             | (Edge SQLite)        |     | - Permanent File IDs       |
             | - users              |     | - Backup Archive Channel   |
             | - nodes              |     | - Media Groups Delivery    |
-            | - materials          |     +----------------------------+
-            | - user_permissions   |
+            | - materials          |     | - Safe copyMessage Queue   |
+            | - user_permissions   |     +----------------------------+
+            | - broadcast_jobs     |
             | - settings           |
             +----------------------+
 ```
@@ -83,15 +92,17 @@
 ## 🗄️ نموذج قاعدة البيانات (Database Schema)
 
 ```sql
--- 1. المستخدمين والصلاحيات وحالة التصفح
+-- 1. المستخدمين والصلاحيات وحالة التصفح والإشعارات
 CREATE TABLE users (
   telegram_id INTEGER PRIMARY KEY,
   full_name TEXT,
   role TEXT DEFAULT 'student',            -- 'student' | 'leader' | 'super_admin'
   managed_node_id INTEGER DEFAULT NULL,  
   current_node_id INTEGER DEFAULT NULL,  -- معرف المجلد الحالي للتنقل الدقيق
-  bot_state TEXT DEFAULT 'browsing',     -- 'browsing' | 'awaiting_folder' | 'uploading' | 'renaming' | 'awaiting_leader_id'
-  view_mode TEXT DEFAULT 'admin'         -- 'admin' | 'student'
+  bot_state TEXT DEFAULT 'browsing',     -- 'browsing' | 'awaiting_folder' | 'uploading' | 'renaming' | 'awaiting_leader_id' | 'awaiting_broadcast'
+  view_mode TEXT DEFAULT 'admin',        -- 'admin' | 'student'
+  subscribed_dept_id INTEGER DEFAULT NULL,-- معرّف القسم المشترك به الطالب
+  notifications_enabled INTEGER DEFAULT 1 -- 1: مفعلة | 0: مكتومة / محظورة
 );
 
 -- 2. الشجرة الهرمية للأقسام والمواد (Hierarchy Tree)
@@ -126,11 +137,31 @@ CREATE TABLE user_permissions (
   PRIMARY KEY (telegram_id, node_id)
 );
 
--- 5. إعدادات النظام (Settings)
+-- 5. طابور مهام الإشعارات المجدولة (Broadcast Queue)
+CREATE TABLE broadcast_jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  dept_node_id INTEGER NOT NULL,
+  dept_title TEXT NOT NULL,
+  sender_id INTEGER NOT NULL,
+  from_chat_id INTEGER NOT NULL,
+  message_id INTEGER NOT NULL,
+  last_user_id INTEGER DEFAULT 0,
+  sent_count INTEGER DEFAULT 0,
+  failed_count INTEGER DEFAULT 0,
+  status TEXT DEFAULT 'pending',          -- 'pending' | 'processing' | 'completed' | 'cancelled'
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 6. إعدادات النظام (Settings)
 CREATE TABLE settings (
   key TEXT PRIMARY KEY,
   value TEXT
 );
+
+CREATE INDEX idx_nodes_parent_order ON nodes(parent_id, sort_order);
+CREATE INDEX idx_materials_node ON materials(node_id);
+CREATE INDEX idx_users_sub ON users(subscribed_dept_id, notifications_enabled, telegram_id);
+CREATE INDEX idx_broadcast_status ON broadcast_jobs(status, id);
 ```
 
 ---
@@ -213,6 +244,7 @@ https://api.telegram.org/bot<YOUR_BOT_TOKEN>/setWebhook?url=https://faculty-tele
 | الأمر | الوظيفة | الصلاحية |
 | :--- | :--- | :--- |
 | `/start` | 🏠 فتح القائمة الرئيسية واختيار وضع الدخول (طالب / مشرف) | متاح للجميع |
+| `/notifications` | 🔔 إعدادات الإشعارات وتحديد واشتراك القسم الأكاديمي | متاح للجميع |
 | `/id` | 🆔 عرض ونسخ الـ Telegram ID الخاص بالمستخدم | متاح للجميع |
 | `/admin` | 👑 فتح لوحة تحكم المسؤول العام (قناة الأرشيف، حالة النظام) | المسؤول العام فقط 🔒 |
 | `/leaders` | 👥 عرض قائمة الليدرز وتعديل أو سحب صلاحيات الأقسام | المسؤول العام فقط 🔒 |

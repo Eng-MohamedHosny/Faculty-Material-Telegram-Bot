@@ -31,6 +31,7 @@ async function main() {
   const resDefault = await sendPost({
     commands: [
       { command: "start", description: "🏠 القائمة الرئيسية وتصفح المواد" },
+      { command: "notifications", description: "🔔 إعدادات الإشعارات واشتراك القسم" },
       { command: "id", description: "🆔 معرفة Telegram ID الخاص بك" },
     ],
     scope: { type: "default" },

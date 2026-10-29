@@ -11,3 +11,6 @@ BACKUP_CHANNEL_ID = "-1004303892625"
 binding = "DB"
 database_name = "college_bot_db"
 database_id = "09093760-0892-4a19-87e6-4e5351e4c474"
+
+[triggers]
+crons = ["* * * * *"]

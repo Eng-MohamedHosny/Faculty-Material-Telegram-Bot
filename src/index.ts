@@ -14,7 +14,9 @@ interface UserRow {
   view_mode: "admin" | "student";
   managed_node_id: number | null;
   current_node_id: number | null;
-  bot_state: "browsing" | "awaiting_folder" | "uploading" | "renaming" | "deleting" | "awaiting_leader_id";
+  bot_state: "browsing" | "awaiting_folder" | "uploading" | "renaming" | "deleting" | "awaiting_leader_id" | "awaiting_broadcast";
+  subscribed_dept_id: number | null;
+  notifications_enabled: number;
 }
 
 interface NodeRow {
@@ -43,7 +45,120 @@ interface FolderWithMaterials {
   materials: MaterialRow[];
 }
 
+interface BroadcastJobRow {
+  id: number;
+  dept_node_id: number;
+  dept_title: string;
+  sender_id: number;
+  from_chat_id: number;
+  message_id: number;
+  last_user_id: number;
+  sent_count: number;
+  failed_count: number;
+  status: "pending" | "processing" | "completed" | "cancelled";
+  created_at: string;
+}
+
+// ================= BACKGROUND BROADCAST QUEUE WORKER =================
+
+async function processBroadcastQueue(env: Env): Promise<void> {
+  const bot = new Bot(env.BOT_TOKEN);
+
+  // Fetch oldest pending or processing broadcast job
+  const job = await env.DB.prepare(
+    "SELECT * FROM broadcast_jobs WHERE status IN ('pending', 'processing') ORDER BY id ASC LIMIT 1"
+  ).first<BroadcastJobRow>();
+
+  if (!job) return;
+
+  if (job.status === "pending") {
+    await env.DB.prepare("UPDATE broadcast_jobs SET status = 'processing' WHERE id = ?")
+      .bind(job.id)
+      .run();
+  }
+
+  // Fetch up to 35 students subscribed to this department (stays well below Cloudflare free tier subrequest limit of 50)
+  const { results: students } = await env.DB.prepare(
+    `SELECT telegram_id FROM users 
+     WHERE subscribed_dept_id = ? AND notifications_enabled = 1 AND telegram_id > ? 
+     ORDER BY telegram_id ASC LIMIT 35`
+  )
+    .bind(job.dept_node_id, job.last_user_id || 0)
+    .all<{ telegram_id: number }>();
+
+  if (!students || students.length === 0) {
+    // All subscribers processed for this job
+    await env.DB.prepare("UPDATE broadcast_jobs SET status = 'completed' WHERE id = ?")
+      .bind(job.id)
+      .run();
+
+    // Send completion report to sender
+    try {
+      await bot.api.sendMessage(
+        job.sender_id,
+        `📢 **تقرير إرسال الإشعار:**\n\n` +
+          `• القسم: **${job.dept_title}**\n` +
+          `• تم الإرسال بنجاح: **${job.sent_count}** طالب ✅\n` +
+          `• تعذر الإرسال: **${job.failed_count}** ⚠️\n\n` +
+          `✅ اكتمل إرسال الإشعار لجميع المشتركين في القسم بنجاح.`,
+        { parse_mode: "Markdown" }
+      );
+    } catch (e) {}
+
+    // Check if there is another pending job in queue
+    const nextJob = await env.DB.prepare(
+      "SELECT 1 FROM broadcast_jobs WHERE status IN ('pending', 'processing') LIMIT 1"
+    ).first();
+    if (nextJob) {
+      await processBroadcastQueue(env);
+    }
+    return;
+  }
+
+  let sent = 0;
+  let failed = 0;
+  let maxUserId = job.last_user_id || 0;
+
+  for (const student of students) {
+    maxUserId = Math.max(maxUserId, student.telegram_id);
+    try {
+      await bot.api.copyMessage(student.telegram_id, job.from_chat_id, job.message_id);
+      sent++;
+    } catch (err: any) {
+      failed++;
+      // Auto-mute if student blocked bot, deactivated account, or chat not found (Telegram 403)
+      if (
+        err?.error_code === 403 ||
+        err?.description?.includes("blocked") ||
+        err?.description?.includes("deactivated") ||
+        err?.description?.includes("chat not found")
+      ) {
+        try {
+          await env.DB.prepare("UPDATE users SET notifications_enabled = 0 WHERE telegram_id = ?")
+            .bind(student.telegram_id)
+            .run();
+        } catch (dbErr) {}
+      }
+    }
+  }
+
+  // Update cursor and counts in atomic transaction
+  await env.DB.prepare(
+    `UPDATE broadcast_jobs 
+     SET sent_count = sent_count + ?, failed_count = failed_count + ?, last_user_id = ? 
+     WHERE id = ?`
+  )
+    .bind(sent, failed, maxUserId, job.id)
+    .run();
+}
+
+// ================= MAIN WORKER EXPORT =================
+
 export default {
+  async scheduled(event: ScheduledEvent, env: Env, executionCtx: ExecutionContext): Promise<void> {
+    executionCtx.waitUntil(processBroadcastQueue(env));
+  },
+
   async fetch(request: Request, env: Env, executionCtx: ExecutionContext): Promise<Response> {
     if (request.method !== "POST") {
       return new Response("FCAI Telegram Bot Worker is running smoothly 🚀", { status: 200 });
@@ -70,7 +185,7 @@ export default {
       if (!user) {
         const defaultRole = isSuper ? "super_admin" : "student";
         await env.DB.prepare(
-          "INSERT INTO users (telegram_id, full_name, role, current_node_id, bot_state, view_mode) VALUES (?, ?, ?, NULL, 'browsing', 'admin')"
+          "INSERT INTO users (telegram_id, full_name, role, current_node_id, bot_state, view_mode, notifications_enabled) VALUES (?, ?, ?, NULL, 'browsing', 'admin', 1)"
         )
           .bind(telegramId, fullName || null, defaultRole)
           .run();
@@ -83,6 +198,8 @@ export default {
           managed_node_id: null,
           current_node_id: null,
           bot_state: "browsing",
+          subscribed_dept_id: null,
+          notifications_enabled: 1,
         };
       } else if (isSuper && user.role !== "super_admin") {
         await env.DB.prepare("UPDATE users SET role = 'super_admin' WHERE telegram_id = ?")
@@ -93,6 +210,9 @@ export default {
 
       if (!user.view_mode) {
         user.view_mode = "admin";
+      }
+      if (user.notifications_enabled === undefined || user.notifications_enabled === null) {
+        user.notifications_enabled = 1;
       }
 
       return user;
@@ -147,6 +267,21 @@ export default {
       return user.role === "super_admin" || user.role === "leader";
     }
 
+    async function getRootDepartment(nodeId: number): Promise<NodeRow | null> {
+      const res = await env.DB.prepare(
+        `WITH RECURSIVE ancestors(id, parent_id, title, sort_order, created_by, is_full_width) AS (
+          SELECT id, parent_id, title, sort_order, created_by, is_full_width FROM nodes WHERE id = ?
+          UNION ALL
+          SELECT n.id, n.parent_id, n.title, n.sort_order, n.created_by, n.is_full_width
+          FROM nodes n JOIN ancestors a ON n.id = a.parent_id
+        )
+        SELECT * FROM ancestors WHERE parent_id IS NULL LIMIT 1`
+      )
+        .bind(nodeId)
+        .first<NodeRow>();
+      return res || null;
+    }
+
     async function getChildNodes(parentId: number | null): Promise<NodeRow[]> {
       if (parentId === null) {
         const { results } = await env.DB.prepare(
@@ -199,6 +334,54 @@ export default {
       }
 
       return result;
+    }
+
+    async function renderNotificationSettings(ctx: any, user: UserRow) {
+      const { results: depts } = await env.DB.prepare(
+        "SELECT id, title FROM nodes WHERE parent_id IS NULL ORDER BY sort_order ASC, id ASC"
+      ).all<{ id: number; title: string }>();
+
+      let currentSubDeptTitle = "غير محدد";
+      if (user.subscribed_dept_id) {
+        const subDept = (depts || []).find((d) => d.id === user.subscribed_dept_id);
+        if (subDept) {
+          currentSubDeptTitle = subDept.title;
+        }
+      }
+
+      const inlineKeyboard = new InlineKeyboard();
+
+      for (const dept of depts || []) {
+        const isSubbed = user.subscribed_dept_id === dept.id;
+        const icon = isSubbed ? "✅ " : "";
+        inlineKeyboard.text(`${icon}${dept.title}`, `sub_dept_${dept.id}`).row();
+      }
+
+      if (user.notifications_enabled === 1) {
+        inlineKeyboard.text("🔕 كتم الإشعارات مؤقتاً", "mute_notifications").row();
+      } else {
+        inlineKeyboard.text("🔔 تفعيل الإشعارات", "unmute_notifications").row();
+      }
+
+      inlineKeyboard.text("❌ إغلاق", "close_notifications");
+
+      const statusText = user.notifications_enabled === 1 ? "مفعلة ✅" : "مكتومة 🔕";
+      const messageText =
+        `🔔 **إعدادات الإشعارات واشتراك الأقسام:**\n\n` +
+        `• قسمك المشترك به: **${currentSubDeptTitle}**\n` +
+        `• حالة وصول التنبيهات: **${statusText}**\n\n` +
+        `📌 باشتراكك في قسمك، ستصلك تنبيهات فورية عند رفع محاضرات أو ملفات جديدة أو إعلانات هامة تخص قسمك فقط.\n\n` +
+        `اختر قسمك من القائمة أدناه لتحديث الاشتراك 👇`;
+
+      if (ctx.callbackQuery) {
+        try {
+          await ctx.editMessageText(messageText, { parse_mode: "Markdown", reply_markup: inlineKeyboard });
+        } catch {
+          await ctx.reply(messageText, { parse_mode: "Markdown", reply_markup: inlineKeyboard });
+        }
+      } else {
+        await ctx.reply(messageText, { parse_mode: "Markdown", reply_markup: inlineKeyboard });
+      }
     }
 
     async function renderFolderView(ctx: any, user: UserRow, nodeId: number | null) {
@@ -261,12 +444,18 @@ export default {
           .text("📐 تخصيص العرض والصفوف")
           .row()
           .text("🗑️ حذف خانة أو ملف")
+          .text("📢 إرسال إشعار للقسم")
           .row();
       } else if (isManager && nodeId === null) {
         keyboard
           .text("➕ إضافة قسم جديد")
           .text("📐 تخصيص العرض والصفوف")
           .row();
+      }
+
+      // Student notification subscription UI at root level (nodeId === null)
+      if (nodeId === null) {
+        keyboard.text("🔔 إعدادات الإشعارات واشتراك القسم").row();
       }
 
       // Navigation Buttons
@@ -401,6 +590,11 @@ export default {
     bot.command("start", async (ctx) => {
       const user = await getUser(ctx.from!.id, ctx.from!.first_name);
       await renderTopLevel(ctx, user);
+    });
+
+    bot.command(["notifications", "notify"], async (ctx) => {
+      const user = await getUser(ctx.from!.id, ctx.from!.first_name);
+      await renderNotificationSettings(ctx, user);
     });
 
     bot.command("id", async (ctx) => {
@@ -567,7 +761,7 @@ export default {
 
       const existing = await env.DB.prepare("SELECT * FROM users WHERE telegram_id = ?").bind(targetId).first<UserRow>();
       if (!existing) {
-        await env.DB.prepare("INSERT INTO users (telegram_id, full_name, role, bot_state, view_mode) VALUES (?, ?, 'leader', 'browsing', 'admin')")
+        await env.DB.prepare("INSERT INTO users (telegram_id, full_name, role, bot_state, view_mode, notifications_enabled) VALUES (?, ?, 'leader', 'browsing', 'admin', 1)")
           .bind(targetId, `User ${targetId}`)
           .run();
       } else {
@@ -599,6 +793,12 @@ export default {
     bot.on("message", async (ctx) => {
       const user = await getUser(ctx.from!.id, ctx.from!.first_name);
       const text = ctx.message.text?.trim();
+
+      // Notification settings menu trigger
+      if (text === "🔔 إعدادات الإشعارات واشتراك القسم") {
+        await renderNotificationSettings(ctx, user);
+        return;
+      }
 
       // Top Level Mode Selection for Admins / Leaders
       if (text?.startsWith("🎓 وضع الطالب") && isPrivileged(user)) {
@@ -664,7 +864,7 @@ export default {
 
         const existing = await env.DB.prepare("SELECT * FROM users WHERE telegram_id = ?").bind(targetId).first<UserRow>();
         if (!existing) {
-          await env.DB.prepare("INSERT INTO users (telegram_id, full_name, role, bot_state, view_mode) VALUES (?, ?, 'leader', 'browsing', 'admin')")
+          await env.DB.prepare("INSERT INTO users (telegram_id, full_name, role, bot_state, view_mode, notifications_enabled) VALUES (?, ?, 'leader', 'browsing', 'admin', 1)")
             .bind(targetId, targetName || `User ${targetId}`)
             .run();
         } else {
@@ -681,12 +881,86 @@ export default {
         return;
       }
 
+      // State: AWAITING BROADCAST MESSAGE
+      if (user.bot_state === "awaiting_broadcast") {
+        if (text === "❌ إلغاء" || text === "⬅️ رجوع" || text === "🏠 الرئيسية" || text === "إلغاء") {
+          await updateUserState(user.telegram_id, "browsing", user.current_node_id, null);
+          user.bot_state = "browsing";
+          await ctx.reply("تم إلغاء إرسال الإشعار.");
+          await renderFolderView(ctx, user, user.current_node_id);
+          return;
+        }
+
+        const targetDeptId = user.managed_node_id;
+        if (!targetDeptId) {
+          await updateUserState(user.telegram_id, "browsing", user.current_node_id, null);
+          user.bot_state = "browsing";
+          await ctx.reply("⚠️ حدث خطأ في تحديد القسم المستهدف.");
+          await renderFolderView(ctx, user, user.current_node_id);
+          return;
+        }
+
+        const deptNode: NodeRow | null = await env.DB.prepare("SELECT * FROM nodes WHERE id = ?")
+          .bind(targetDeptId)
+          .first<NodeRow>();
+
+        const deptTitle = deptNode?.title || "القسم";
+
+        await env.DB.prepare(
+          `INSERT INTO broadcast_jobs (dept_node_id, dept_title, sender_id, from_chat_id, message_id, status)
+           VALUES (?, ?, ?, ?, ?, 'pending')`
+        )
+          .bind(targetDeptId, deptTitle, user.telegram_id, ctx.chat.id, ctx.message.message_id)
+          .run();
+
+        const subCount = await env.DB.prepare(
+          "SELECT COUNT(*) as count FROM users WHERE subscribed_dept_id = ? AND notifications_enabled = 1"
+        )
+          .bind(targetDeptId)
+          .first<{ count: number }>();
+
+        await updateUserState(user.telegram_id, "browsing", user.current_node_id, null);
+        user.bot_state = "browsing";
+
+        await ctx.reply(
+          `✅ **تم جدولة إرسال الإشعار بنجاح!**\n\n` +
+            `• القسم المستهدف: **${deptTitle}**\n` +
+            `• عدد الطلاب المشتركين: **${subCount?.count || 0}** طالب\n\n` +
+            `⏳ يجري الإرسال بالخلفية بأمان لتفادي قيود تيليجرام، وستصلك رسالة تأكيد فور اكتمال الإرسال للجميع.`,
+          { parse_mode: "Markdown" }
+        );
+
+        executionCtx.waitUntil(processBroadcastQueue(env));
+        await renderFolderView(ctx, user, user.current_node_id);
+        return;
+      }
+
       // State: UPLOADING (Batch File Upload)
       if (user.bot_state === "uploading") {
         if (text === "✅ إنهاء الحفظ" || text === "إنهاء الحفظ") {
+          const folderNode = user.current_node_id
+            ? await env.DB.prepare("SELECT * FROM nodes WHERE id = ?").bind(user.current_node_id).first<NodeRow>()
+            : null;
+          const folderTitle = folderNode?.title || "المقرر";
+
+          const rootDept = user.current_node_id ? await getRootDepartment(user.current_node_id) : null;
+
           await updateUserState(user.telegram_id, "browsing");
           user.bot_state = "browsing";
-          await ctx.reply("✅ تم حفظ كافة الملفات بنجاح.");
+
+          if (rootDept && user.current_node_id) {
+            const inlineBtn = new InlineKeyboard().text(
+              "🔔 إرسال تنبيه لطلاب القسم بالملفات الجديدة",
+              `notify_new_materials_${user.current_node_id}_${rootDept.id}`
+            );
+            await ctx.reply(
+              `✅ **تم حفظ كافة الملفات بنجاح في:**\n📂 **${folderTitle}**\n\nهل ترغب في إرسال تنبيه فوري لجميع طلاب قسم **${rootDept.title}** المشتركين بالإشعارات؟`,
+              { parse_mode: "Markdown", reply_markup: inlineBtn }
+            );
+          } else {
+            await ctx.reply("✅ تم حفظ كافة الملفات بنجاح.");
+          }
+
           await renderFolderView(ctx, user, user.current_node_id);
           return;
         }
@@ -857,7 +1131,30 @@ export default {
         return;
       }
 
-      // Admin Actions
+      // Admin Action: Manual Broadcast to Department
+      if (text === "📢 إرسال إشعار للقسم" && (await canManage(user, user.current_node_id)) && user.current_node_id !== null) {
+        const rootDept = await getRootDepartment(user.current_node_id);
+        if (!rootDept) {
+          return ctx.reply("⚠️ لا يمكن تحديد القسم التابع له هذا المجلد.");
+        }
+
+        await updateUserState(user.telegram_id, "awaiting_broadcast", user.current_node_id, rootDept.id);
+        user.bot_state = "awaiting_broadcast";
+        user.managed_node_id = rootDept.id;
+
+        const cancelKeyboard = new Keyboard().text("❌ إلغاء").resized();
+        await ctx.reply(
+          `📢 **إرسال إشعار لطلاب قسم [${rootDept.title}]:**\n\n` +
+            `✍️ أرسل الآن الرسالة أو المنشور المراد تعميمه على جميع طلاب هذا القسم المشتركين بالإشعارات.\n` +
+            `(يمكنك إرسال نص عادي، أو صورة، أو فيديو، أو ملف PDF مع الشرح)\n\n` +
+            `⚠️ ستصل الرسالة بنسختها الأصلية لكل الطلاب المشتركين.\n` +
+            `أو اضغط زر **[❌ إلغاء]** للتراجع.`,
+          { parse_mode: "Markdown", reply_markup: cancelKeyboard }
+        );
+        return;
+      }
+
+      // Admin Action: Upload Files
       if (text === "📤 رفع ملفات هنا" && (await canManage(user, user.current_node_id))) {
         if (!user.current_node_id) {
           return ctx.reply("❌ لا يمكن رفع ملفات في الصفحة الرئيسية، يرجى الدخول لمادة أو خانة أولاً.");
@@ -871,6 +1168,7 @@ export default {
         return;
       }
 
+      // Admin Action: Add Node
       if ((text === "➕ إضافة خانة/مادة" || text === "➕ إضافة قسم جديد") && (await canManage(user, user.current_node_id))) {
         await updateUserState(user.telegram_id, "awaiting_folder");
         const cancelKeyboard = new Keyboard().text("❌ إلغاء").resized();
@@ -880,6 +1178,7 @@ export default {
         return;
       }
 
+      // Admin Action: Layout Customization
       if (text === "📐 تخصيص العرض والصفوف" && (await canManage(user, user.current_node_id))) {
         const children = await getChildNodes(user.current_node_id);
         if (children.length === 0) {
@@ -896,6 +1195,7 @@ export default {
         return;
       }
 
+      // Admin Action: Rename
       if (text === "✏️ تعديل الاسم" && (await canManage(user, user.current_node_id))) {
         const children = await getChildNodes(user.current_node_id);
         const inlineKeyboard = new InlineKeyboard();
@@ -915,6 +1215,7 @@ export default {
         return;
       }
 
+      // Student / Manager Action: Re-trigger files sending
       if (text?.startsWith("📥 إرسال الملفات") && user.current_node_id) {
         const materials = await getNodeMaterials(user.current_node_id);
         if (materials.length > 0) {
@@ -925,6 +1226,7 @@ export default {
         return;
       }
 
+      // Admin Action: Delete node or material
       if (text === "🗑️ حذف خانة أو ملف" && (await canManage(user, user.current_node_id)) && user.current_node_id) {
         const children = await getChildNodes(user.current_node_id);
         const materials = await getNodeMaterials(user.current_node_id);
@@ -1006,6 +1308,95 @@ export default {
       if (data === "close_delete") {
         await ctx.deleteMessage();
         await renderFolderView(ctx, user, user.current_node_id);
+        return;
+      }
+
+      if (data === "close_notifications") {
+        await ctx.deleteMessage();
+        return;
+      }
+
+      // Notification settings callbacks
+      if (data.startsWith("sub_dept_")) {
+        const deptId = parseInt(data.replace("sub_dept_", ""), 10);
+        await env.DB.prepare("UPDATE users SET subscribed_dept_id = ?, notifications_enabled = 1 WHERE telegram_id = ?")
+          .bind(deptId, user.telegram_id)
+          .run();
+        user.subscribed_dept_id = deptId;
+        user.notifications_enabled = 1;
+        await ctx.answerCallbackQuery({ text: "✅ تم تحديث اشتراكك في القسم وتفعيل الإشعارات!" });
+        await renderNotificationSettings(ctx, user);
+        return;
+      }
+
+      if (data === "mute_notifications") {
+        await env.DB.prepare("UPDATE users SET notifications_enabled = 0 WHERE telegram_id = ?")
+          .bind(user.telegram_id)
+          .run();
+        user.notifications_enabled = 0;
+        await ctx.answerCallbackQuery({ text: "🔕 تم كتم الإشعارات مؤقتاً." });
+        await renderNotificationSettings(ctx, user);
+        return;
+      }
+
+      if (data === "unmute_notifications") {
+        await env.DB.prepare("UPDATE users SET notifications_enabled = 1 WHERE telegram_id = ?")
+          .bind(user.telegram_id)
+          .run();
+        user.notifications_enabled = 1;
+        await ctx.answerCallbackQuery({ text: "🔔 تم تفعيل الإشعارات بنجاح!" });
+        await renderNotificationSettings(ctx, user);
+        return;
+      }
+
+      // One-click batch upload notification callback
+      if (data.startsWith("notify_new_materials_")) {
+        const parts = data.replace("notify_new_materials_", "").split("_");
+        const folderId = parseInt(parts[0], 10);
+        const deptId = parseInt(parts[1], 10);
+
+        if (!(await canManage(user, folderId))) {
+          await ctx.answerCallbackQuery({ text: "❌ لا تملك الصلاحية", show_alert: true });
+          return;
+        }
+
+        const folderNode = await env.DB.prepare("SELECT * FROM nodes WHERE id = ?").bind(folderId).first<NodeRow>();
+        const deptNode = await env.DB.prepare("SELECT * FROM nodes WHERE id = ?").bind(deptId).first<NodeRow>();
+        const folderTitle = folderNode?.title || "المقرر";
+        const deptTitle = deptNode?.title || "القسم";
+
+        const announcementMsg = await ctx.reply(
+          `📚 **تنبيه بمحتوى جديد — [${deptTitle}]**\n\n` +
+            `تم رفع ملفات ومحاضرات جديدة في:\n` +
+            `📂 **${folderTitle}**\n\n` +
+            `اضغط زر الرئيسية أو تصفح البوت للاطلاع عليها وتحميلها! 🚀`,
+          { parse_mode: "Markdown" }
+        );
+
+        const chatId = ctx.chat?.id || ctx.from.id;
+        await env.DB.prepare(
+          `INSERT INTO broadcast_jobs (dept_node_id, dept_title, sender_id, from_chat_id, message_id, status)
+           VALUES (?, ?, ?, ?, ?, 'pending')`
+        )
+          .bind(deptId, deptTitle, user.telegram_id, chatId, announcementMsg.message_id)
+          .run();
+
+        const subCount = await env.DB.prepare(
+          "SELECT COUNT(*) as count FROM users WHERE subscribed_dept_id = ? AND notifications_enabled = 1"
+        )
+          .bind(deptId)
+          .first<{ count: number }>();
+
+        await ctx.answerCallbackQuery({ text: "✅ تم جدولة إرسال التنبيه للطلاب بنجاح!" });
+
+        try {
+          await ctx.editMessageText(
+            `✅ **تم جدولة التنبيه بنجاح لطلاب قسم [${deptTitle}]** (${subCount?.count || 0} طالب).\nيجري الإرسال في الخلفية...`,
+            { parse_mode: "Markdown" }
+          );
+        } catch (e) {}
+
+        executionCtx.waitUntil(processBroadcastQueue(env));
         return;
       }
 

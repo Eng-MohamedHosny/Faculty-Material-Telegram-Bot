@@ -47,6 +47,13 @@ Engineered on an **Edge Serverless Architecture** (Cloudflare Workers + D1 SQLit
 - **Button Layout Customization:** Toggle any menu button between full width (🔘) and dual column (👥), with a one-click option to propagate the layout across the department or the whole college.
 - **One-Click Material Downloader:** A `📦 Download All Content` button recursively aggregates and sends all course materials categorized by chapter.
 
+### 6. Department Broadcast & Safe Notification System (v2.0)
+- **Student Subscription Settings:** Dedicated root menu button (`🔔 إعدادات الإشعارات واشتراك القسم` or `/notifications`) allowing students to subscribe to their specific academic department (CS, IT, IS, Networks) and toggle notifications on/off.
+- **Safe Chunked Background Broadcast Queue:** Outbound notifications are routed through the `broadcast_jobs` table and processed asynchronously via Cloudflare Workers Cron Trigger (`* * * * *`) at 35 students per minute/invocation. This strictly satisfies Cloudflare Free Tier subrequest limitations (maximum 50 subrequests) and Telegram's 30 msgs/sec rate limits.
+- **Auto-Muting Blocked Accounts:** Gracefully catches Telegram 403 errors (when a user blocks the bot or deactivates their account) and immediately sets `notifications_enabled = 0`, eliminating wasted worker quota.
+- **In-Chat Leader Broadcast:** Department leaders have a `📢 إرسال إشعار للقسم` button inside their assigned department folders to compose and blast announcements, texts, images, or PDFs to all enrolled students.
+- **1-Click Post-Upload Notification:** Upon completing a batch upload session (`[✅ إنهاء الحفظ]`), leaders receive a 1-click prompt `[🔔 إرسال تنبيه لطلاب القسم بالملفات الجديدة]` to notify department students of the newly published materials.
+
 ---
 
 ## 🏗️ System Architecture
@@ -56,7 +63,7 @@ Engineered on an **Edge Serverless Architecture** (Cloudflare Workers + D1 SQLit
                      |         Telegram Messenger            |
                      |  Students / Leaders / Super Admin     |
                      +-------------------+-------------------+
-                                         |  HTTPS Webhook
+                                         |  HTTPS Webhook & Cron (* * * * *)
                                          v
                      +---------------------------------------+
                      |       Cloudflare Workers (Edge)       |
@@ -64,6 +71,7 @@ Engineered on an **Edge Serverless Architecture** (Cloudflare Workers + D1 SQLit
                      |  - Routing & Navigation State Machine |
                      |  - Role-Based Access Control (RBAC)   |
                      |  - Instant Optimistic UI Handlers     |
+                     |  - Scheduled Broadcast Queue Worker   |
                      +---------+-------------------+---------+
                                |                   |
             Fast SQL Queries   |                   | Telegram API Calls
@@ -73,8 +81,9 @@ Engineered on an **Edge Serverless Architecture** (Cloudflare Workers + D1 SQLit
             | (Edge SQLite)        |     | - Permanent File IDs       |
             | - users              |     | - Backup Archive Channel   |
             | - nodes              |     | - Batch Media Grouping     |
-            | - materials          |     +----------------------------+
-            | - user_permissions   |
+            | - materials          |     | - Safe copyMessage Queue   |
+            | - user_permissions   |     +----------------------------+
+            | - broadcast_jobs     |
             | - settings           |
             +----------------------+
 ```
@@ -84,15 +93,17 @@ Engineered on an **Edge Serverless Architecture** (Cloudflare Workers + D1 SQLit
 ## 🗄️ Database Schema (SQLite / D1)
 
 ```sql
--- 1. Users, Navigation State & View Modes
+-- 1. Users, Navigation State, View Modes & Notifications
 CREATE TABLE users (
   telegram_id INTEGER PRIMARY KEY,
   full_name TEXT,
   role TEXT DEFAULT 'student',            -- 'student' | 'leader' | 'super_admin'
   managed_node_id INTEGER DEFAULT NULL,
   current_node_id INTEGER DEFAULT NULL,  -- Current folder ID for accurate Back navigation
-  bot_state TEXT DEFAULT 'browsing',     -- 'browsing' | 'uploading' | 'renaming' | 'awaiting_folder' | 'awaiting_leader_id'
-  view_mode TEXT DEFAULT 'admin'         -- 'admin' | 'student'
+  bot_state TEXT DEFAULT 'browsing',     -- 'browsing' | 'uploading' | 'renaming' | 'awaiting_folder' | 'awaiting_leader_id' | 'awaiting_broadcast'
+  view_mode TEXT DEFAULT 'admin',        -- 'admin' | 'student'
+  subscribed_dept_id INTEGER DEFAULT NULL,-- Subscribed root department ID for notifications
+  notifications_enabled INTEGER DEFAULT 1 -- 1: Active | 0: Muted / blocked
 );
 
 -- 2. Dynamic Hierarchy Tree (Departments, Semesters, Courses, Sections)
@@ -127,14 +138,31 @@ CREATE TABLE user_permissions (
   PRIMARY KEY (telegram_id, node_id)
 );
 
--- 5. System Settings & Archive Channel
+-- 5. Broadcast Jobs Queue (Cloudflare Cron Triggers)
+CREATE TABLE broadcast_jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  dept_node_id INTEGER NOT NULL,
+  dept_title TEXT NOT NULL,
+  sender_id INTEGER NOT NULL,
+  from_chat_id INTEGER NOT NULL,
+  message_id INTEGER NOT NULL,
+  last_user_id INTEGER DEFAULT 0,
+  sent_count INTEGER DEFAULT 0,
+  failed_count INTEGER DEFAULT 0,
+  status TEXT DEFAULT 'pending',          -- 'pending' | 'processing' | 'completed' | 'cancelled'
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 6. System Settings & Archive Channel
 CREATE TABLE settings (
   key TEXT PRIMARY KEY,
   value TEXT
 );
 
-CREATE INDEX idx_nodes_parent ON nodes(parent_id);
+CREATE INDEX idx_nodes_parent_order ON nodes(parent_id, sort_order);
 CREATE INDEX idx_materials_node ON materials(node_id);
+CREATE INDEX idx_users_sub ON users(subscribed_dept_id, notifications_enabled, telegram_id);
+CREATE INDEX idx_broadcast_status ON broadcast_jobs(status, id);
 ```
 
 ---
@@ -220,6 +248,7 @@ BOT_TOKEN="your_token" SUPER_ADMIN_ID="your_id" node scripts/set_commands.js
 | Command | Description | Access Scope |
 | :--- | :--- | :--- |
 | `/start` | 🏠 Open main menu and toggle Student/Admin mode | Public (All users) |
+| `/notifications` | 🔔 Student department subscription and alert settings | Public (All users) |
 | `/id` | 🆔 Display and tap-to-copy your numeric Telegram ID | Public (All users) |
 | `/admin` | 👑 Open Super Admin Dashboard (channel status, leader list) | Super Admin Only 🔒 |
 | `/leaders` | 👥 Manage assigned department scopes per leader | Super Admin Only 🔒 |

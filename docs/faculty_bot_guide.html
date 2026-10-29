@@ -407,6 +407,14 @@
     <div class="card-header"><span class="icon">📐</span> تخصيص العرض والصفوف (Layout Control)</div>
     <p>التحكم في عرض كل زر (صف عريض 🔘 ↔️ صف مزدوج 👥) مع زر تعميم التنسيق على باقي المواد لتنظيم الواجهة.</p>
   </div>
+  <div class="card">
+    <div class="card-header"><span class="icon">🔔</span> اشتراك الأقسام والتنبيهات (Subscriptions)</div>
+    <p>زر دائم بشاشة البداية لاشتراك الطالب في قسمه مع كتم أو تفعيل التنبيهات، وتنبيه تلقائي بنقرة واحدة بعد رفع الملفات.</p>
+  </div>
+  <div class="card">
+    <div class="card-header"><span class="icon">📢</span> التعميم الآمن المجدول (Cron Broadcast)</div>
+    <p>إرسال تعميمات القسم عبر طابور بالخلفية (35 طالب/دقيقة) لضمان البقاء تحت قيود كلاودفلير وتيليجرام مع كتم المحظورين.</p>
+  </div>
 </div>
 
 <div class="footer-bar">
@@ -424,7 +432,7 @@
 </p>
 
 <div class="code-block">
--- 1. جدول المستخدمين والصلاحيات
+-- 1. جدول المستخدمين والصلاحيات والإشعارات
 CREATE TABLE users (
   telegram_id INTEGER PRIMARY KEY,
   full_name TEXT,
@@ -432,7 +440,9 @@ CREATE TABLE users (
   managed_node_id INTEGER DEFAULT NULL,
   current_node_id INTEGER DEFAULT NULL,  -- معرف المجلد الحالي للرجوع السلس
   bot_state TEXT DEFAULT 'browsing',     -- حالة المحادثة
-  view_mode TEXT DEFAULT 'admin'         -- 'admin' | 'student'
+  view_mode TEXT DEFAULT 'admin',        -- 'admin' | 'student'
+  subscribed_dept_id INTEGER DEFAULT NULL,-- معرّف القسم المشترك به
+  notifications_enabled INTEGER DEFAULT 1 -- 1: مفعل | 0: مكتوم / محظور
 );
 
 -- 2. الشجرة الهرمية للأقسام والمواد
@@ -467,8 +477,25 @@ CREATE TABLE user_permissions (
   PRIMARY KEY (telegram_id, node_id)
 );
 
-CREATE INDEX idx_nodes_parent ON nodes(parent_id);
+-- 5. طابور مهام الإرسال المجدول (Broadcast Jobs Queue)
+CREATE TABLE broadcast_jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  dept_node_id INTEGER NOT NULL,
+  dept_title TEXT NOT NULL,
+  sender_id INTEGER NOT NULL,
+  from_chat_id INTEGER NOT NULL,
+  message_id INTEGER NOT NULL,
+  last_user_id INTEGER DEFAULT 0,
+  sent_count INTEGER DEFAULT 0,
+  failed_count INTEGER DEFAULT 0,
+  status TEXT DEFAULT 'pending',          -- 'pending' | 'processing' | 'completed'
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_nodes_parent_order ON nodes(parent_id, sort_order);
 CREATE INDEX idx_materials_node ON materials(node_id);
+CREATE INDEX idx_users_sub ON users(subscribed_dept_id, notifications_enabled, telegram_id);
+CREATE INDEX idx_broadcast_status ON broadcast_jobs(status, id);
 </div>
 
 <div class="section-title"><span class="icon">🚀</span> 6. خطوات التثبيت والتشغيل السحابي خطوة بخطوة</div>
@@ -549,6 +576,11 @@ CREATE INDEX idx_materials_node ON materials(node_id);
     <tr>
       <td><code>/start</code></td>
       <td>فتح القائمة الرئيسية وتبديل الوضع (طالب 🎓 / مشرف ⚙️).</td>
+      <td><span class="badge badge-student">متاح للجميع</span></td>
+    </tr>
+    <tr>
+      <td><code>/notifications</code></td>
+      <td>إعدادات الإشعارات وتحديد واشتراك القسم الأكاديمي.</td>
       <td><span class="badge badge-student">متاح للجميع</span></td>
     </tr>
     <tr>
