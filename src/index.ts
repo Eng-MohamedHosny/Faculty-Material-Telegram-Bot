@@ -50,7 +50,7 @@ interface MaterialRow {
   node_id: number;
   file_name: string;
   telegram_file_id: string;
-  file_type: "document" | "video" | "photo" | "audio" | "link";
+  file_type: "document" | "video" | "photo" | "audio" | "link" | "text";
   caption: string | null;
   uploaded_by: number | null;
   created_at: string;
@@ -98,6 +98,7 @@ interface WeeklyTaskRow {
   task_title: string;
   due_date: string;
   attachment_file_id: string | null;
+  attachment_type?: "document" | "photo" | "video" | "audio" | null;
   created_by: number | null;
   created_at: string;
 }
@@ -334,6 +335,17 @@ export default {
           .bind(nodeId, user.telegram_id)
           .first();
         return !!match;
+      }
+      return false;
+    }
+
+    async function canManageDept(user: UserRow, deptId: number): Promise<boolean> {
+      if (user.role === "super_admin") return true;
+      if (user.role === "leader") {
+        const has = await env.DB.prepare(
+          "SELECT 1 FROM user_permissions WHERE telegram_id = ? AND node_id = ? LIMIT 1"
+        ).bind(user.telegram_id, deptId).first();
+        return !!has;
       }
       return false;
     }
@@ -639,7 +651,7 @@ export default {
         .bind(deptId)
         .first<{ title: string }>();
 
-      const isManager = await canManage(user, deptId);
+      const isManager = await canManageDept(user, deptId);
 
       const { results: tasks } = await env.DB.prepare(
         `SELECT * FROM weekly_tasks 
@@ -676,19 +688,21 @@ export default {
       const inlineKeyboard = new InlineKeyboard();
       let message = `📅 **تاسكات وتسليمات الأسبوع — [${deptNode?.title}]:**\n\n`;
 
+      const KEYCAP_NUMS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"];
       const now = Date.now();
       tasks.forEach((t, index) => {
+        const numBadge = KEYCAP_NUMS[index] || `${index + 1}️⃣`;
         const dueTime = new Date(t.due_date).getTime();
         const diffHours = Math.round((dueTime - now) / (1000 * 60 * 60));
         const diffDays = Math.ceil(diffHours / 24);
         const remainingText = diffHours <= 24 ? `متبقي ${Math.max(1, diffHours)} ساعة ⚠️` : `متبقي ${diffDays} يوم`;
 
-        message += `${index + 1}️⃣ **مادة ${t.course_title}**\n`;
+        message += `${numBadge} **مادة ${t.course_title}**\n`;
         message += `📝 **التكليف:** ${t.task_title}\n`;
         message += `⏰ **الموعد النهائي:** ${t.due_date} (${remainingText})\n\n`;
 
         if (t.attachment_file_id) {
-          inlineKeyboard.text(`📥 تحميل شيت: ${t.course_title}`, `dl_task_${t.id}`).row();
+          inlineKeyboard.text(`📥 تحميل ماتيريال التاسك رقم ${numBadge}`, `dl_task_${t.id}`).row();
         }
       });
 
@@ -710,9 +724,15 @@ export default {
     }
 
     async function renderTaskManagementList(ctx: any, deptId: number, user: UserRow) {
-      if (!(await canManage(user, deptId))) {
-        await ctx.answerCallbackQuery({ text: "❌ لا تملك الصلاحية لإدارة تاسكات هذا القسم", show_alert: true });
+      if (!(await canManageDept(user, deptId))) {
+        if (ctx.callbackQuery) {
+          await ctx.answerCallbackQuery({ text: "❌ لا تملك الصلاحية لإدارة تاسكات هذا القسم", show_alert: true }).catch(() => {});
+        }
         return;
+      }
+
+      if (ctx.callbackQuery) {
+        await ctx.answerCallbackQuery().catch(() => {});
       }
 
       const deptNode = await env.DB.prepare("SELECT title FROM nodes WHERE id = ?").bind(deptId).first<{ title: string }>();
@@ -725,7 +745,11 @@ export default {
         kb.text("⬅️ رجوع لقائمة التاسكات", `back_to_tasks_${deptId}`).row();
         const emptyMsg = `⚙️ **إدارة التاسكات — [${deptNode?.title}]:**\n\nلا توجد تاسكات مسجلة حالياً في هذا القسم.`;
         if (ctx.callbackQuery) {
-          await ctx.editMessageText(emptyMsg, { parse_mode: "Markdown", reply_markup: kb });
+          try {
+            await ctx.editMessageText(emptyMsg, { parse_mode: "Markdown", reply_markup: kb });
+          } catch {
+            await ctx.editMessageText(emptyMsg.replace(/[*_`\[\]]/g, ""), { reply_markup: kb });
+          }
         } else {
           await ctx.reply(emptyMsg, { parse_mode: "Markdown", reply_markup: kb });
         }
@@ -742,7 +766,11 @@ export default {
       kb.text("❌ إغلاق", "close_tasks");
 
       if (ctx.callbackQuery) {
-        await ctx.editMessageText(text, { parse_mode: "Markdown", reply_markup: kb });
+        try {
+          await ctx.editMessageText(text, { parse_mode: "Markdown", reply_markup: kb });
+        } catch {
+          await ctx.editMessageText(text.replace(/[*_`\[\]]/g, ""), { reply_markup: kb });
+        }
       } else {
         await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb });
       }
@@ -752,16 +780,20 @@ export default {
       const task = await env.DB.prepare("SELECT * FROM weekly_tasks WHERE id = ?").bind(taskId).first<WeeklyTaskRow>();
       if (!task) {
         if (ctx.callbackQuery) {
-          await ctx.answerCallbackQuery({ text: "التاسك غير موجود أو تم حذفه", show_alert: true });
+          await ctx.answerCallbackQuery({ text: "التاسك غير موجود أو تم حذفه", show_alert: true }).catch(() => {});
         }
         return;
       }
 
-      if (!(await canManage(user, task.dept_node_id))) {
+      if (!(await canManageDept(user, task.dept_node_id))) {
         if (ctx.callbackQuery) {
-          await ctx.answerCallbackQuery({ text: "❌ لا تملك الصلاحية", show_alert: true });
+          await ctx.answerCallbackQuery({ text: "❌ لا تملك الصلاحية", show_alert: true }).catch(() => {});
         }
         return;
+      }
+
+      if (ctx.callbackQuery) {
+        await ctx.answerCallbackQuery().catch(() => {});
       }
 
       const hasFile = Boolean(task.attachment_file_id);
@@ -789,7 +821,11 @@ export default {
         `اختر الإجراء الذي تريد تطبيقه بالأسفل 👇`;
 
       if (ctx.callbackQuery) {
-        await ctx.editMessageText(text, { parse_mode: "Markdown", reply_markup: kb });
+        try {
+          await ctx.editMessageText(text, { parse_mode: "Markdown", reply_markup: kb });
+        } catch {
+          await ctx.editMessageText(text.replace(/[*_`\[\]]/g, ""), { reply_markup: kb });
+        }
       } else {
         await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb });
       }
@@ -1061,9 +1097,33 @@ export default {
     }
 
     async function sendBatchMaterials(ctx: any, materials: MaterialRow[]) {
+      // 1. Send text notes first
+      const textMaterials = materials.filter((m) => m.file_type === "text");
+      const mediaMaterials = materials.filter((m) => m.file_type !== "text");
+
+      const backupChannelId = getBackupChannelId();
+
+      for (const tm of textMaterials) {
+        let sent = false;
+        if (backupChannelId && tm.backup_message_id) {
+          try {
+            await ctx.api.copyMessage(ctx.chat.id, backupChannelId, tm.backup_message_id);
+            sent = true;
+          } catch (e) {
+            sent = false;
+          }
+        }
+        if (!sent) {
+          try {
+            await ctx.reply(tm.caption || tm.file_name);
+          } catch (err) {}
+        }
+      }
+
+      // 2. Send media files in chunks
       const chunkSize = 10;
-      for (let i = 0; i < materials.length; i += chunkSize) {
-        const chunk = materials.slice(i, i + chunkSize);
+      for (let i = 0; i < mediaMaterials.length; i += chunkSize) {
+        const chunk = mediaMaterials.slice(i, i + chunkSize);
 
         const mediaGroup = chunk.map((m) => {
           let type: "document" | "video" | "photo" | "audio" = "document";
@@ -1095,7 +1155,15 @@ export default {
         } catch (e: any) {
           for (const m of chunk) {
             try {
-              await ctx.replyWithDocument(m.telegram_file_id, { caption: m.caption || m.file_name });
+              if (m.file_type === "photo") {
+                await ctx.replyWithPhoto(m.telegram_file_id, { caption: m.caption || m.file_name });
+              } else if (m.file_type === "video") {
+                await ctx.replyWithVideo(m.telegram_file_id, { caption: m.caption || m.file_name });
+              } else if (m.file_type === "audio") {
+                await ctx.replyWithAudio(m.telegram_file_id, { caption: m.caption || m.file_name });
+              } else {
+                await ctx.replyWithDocument(m.telegram_file_id, { caption: m.caption || m.file_name });
+              }
             } catch (err) {}
           }
         }
@@ -1435,20 +1503,28 @@ export default {
       const text = ctx.message.text?.trim();
 
       // Priority 1: Navigation & Cancellation Guard
-      const isNavCancel =
-        text &&
-        (text.includes("إلغاء") ||
-          text.includes("رجوع") ||
-          text.includes("الرئيسية") ||
-          text.includes("تبديل الوضع") ||
-          (text.startsWith("/") && !text.startsWith("/promote") && !text.startsWith("/demote")));
+      let isNavCancel = false;
+      if (user.bot_state === "uploading") {
+        isNavCancel =
+          text === "❌ إلغاء" ||
+          text === "إلغاء" ||
+          (!!text && text.startsWith("/") && !text.startsWith("/promote") && !text.startsWith("/demote"));
+      } else {
+        isNavCancel =
+          !!text &&
+          (text.includes("إلغاء") ||
+            text.includes("رجوع") ||
+            text.includes("الرئيسية") ||
+            text.includes("تبديل الوضع") ||
+            (text.startsWith("/") && !text.startsWith("/promote") && !text.startsWith("/demote")));
+      }
 
       if (isNavCancel && user.bot_state !== "browsing") {
         await updateUserState(user.telegram_id, "browsing", user.current_node_id, null, null);
         user.bot_state = "browsing";
         user.managed_node_id = null;
         user.pending_target_id = null;
-        if (!text.startsWith("/")) {
+        if (!text || !text.startsWith("/")) {
           await ctx.reply("تم الإلغاء والعودة إلى وضع التصفح.");
           await renderFolderView(ctx, user, user.current_node_id);
           return;
@@ -1890,19 +1966,25 @@ export default {
 
         const draft = JSON.parse(draftRow.value);
         let attachmentId: string | null = null;
+        let attachmentType: "document" | "photo" | "video" | null = null;
 
         if (ctx.message.document) {
           attachmentId = ctx.message.document.file_id;
+          attachmentType = "document";
         } else if (ctx.message.photo) {
           const highestPhoto = ctx.message.photo[ctx.message.photo.length - 1];
           attachmentId = highestPhoto.file_id;
+          attachmentType = "photo";
+        } else if (ctx.message.video) {
+          attachmentId = ctx.message.video.file_id;
+          attachmentType = "video";
         }
 
         const taskInsert = await env.DB.prepare(
-          `INSERT INTO weekly_tasks (dept_node_id, course_title, task_title, due_date, attachment_file_id, created_by)
-           VALUES (?, ?, ?, ?, ?, ?) RETURNING id`
+          `INSERT INTO weekly_tasks (dept_node_id, course_title, task_title, due_date, attachment_file_id, attachment_type, created_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id`
         )
-          .bind(draft.dept_id, draft.course_title, draft.task_title, draft.due_date, attachmentId, user.telegram_id)
+          .bind(draft.dept_id, draft.course_title, draft.task_title, draft.due_date, attachmentId, attachmentType, user.telegram_id)
           .first<{ id: number }>();
 
         await env.DB.prepare("DELETE FROM settings WHERE key = ?").bind(`task_draft_${user.telegram_id}`).run();
@@ -1975,20 +2057,26 @@ export default {
       if (user.bot_state === "awaiting_edit_task_file") {
         const taskId = user.pending_target_id;
         let attachmentId: string | null = null;
+        let attachmentType: "document" | "photo" | "video" | null = null;
 
         if (ctx.message.document) {
           attachmentId = ctx.message.document.file_id;
+          attachmentType = "document";
         } else if (ctx.message.photo) {
           const highestPhoto = ctx.message.photo[ctx.message.photo.length - 1];
           attachmentId = highestPhoto.file_id;
+          attachmentType = "photo";
+        } else if (ctx.message.video) {
+          attachmentId = ctx.message.video.file_id;
+          attachmentType = "video";
         }
 
         if (!taskId || !attachmentId) {
           return ctx.reply("⚠️ يرجى إرسال ملف PDF أو صورة لتحديث ملف التكليف، أو اضغط [❌ إلغاء].");
         }
 
-        await env.DB.prepare("UPDATE weekly_tasks SET attachment_file_id = ? WHERE id = ?")
-          .bind(attachmentId, taskId)
+        await env.DB.prepare("UPDATE weekly_tasks SET attachment_file_id = ?, attachment_type = ? WHERE id = ?")
+          .bind(attachmentId, attachmentType, taskId)
           .run();
 
         await updateUserState(user.telegram_id, "browsing", user.current_node_id, null, null);
@@ -2033,7 +2121,7 @@ export default {
         let fileId: string | null = null;
         let fileName = "Unnamed File";
         let fileType: MaterialRow["file_type"] = "document";
-        const caption = ctx.message.caption || null;
+        let caption = ctx.message.caption || null;
 
         if (ctx.message.document) {
           fileId = ctx.message.document.file_id;
@@ -2052,6 +2140,12 @@ export default {
           fileId = ctx.message.audio.file_id;
           fileName = ctx.message.audio.file_name || "Audio.mp3";
           fileType = "audio";
+        } else if (ctx.message.text) {
+          fileId = "text_content";
+          fileType = "text";
+          caption = ctx.message.text;
+          const firstLine = ctx.message.text.split("\n")[0].trim();
+          fileName = `📝 ${firstLine.substring(0, 40) || "ملاحظة نصية"}`;
         }
 
         if (fileId && user.current_node_id) {
@@ -2059,9 +2153,14 @@ export default {
           const backupChannelId = getBackupChannelId();
           if (backupChannelId) {
             try {
-              const res = await ctx.api.copyMessage(backupChannelId, ctx.chat.id, ctx.message.message_id, {
-                caption: `📄 الملف: ${fileName}`,
-              });
+              let res: any;
+              if (fileType === "text") {
+                res = await ctx.api.copyMessage(backupChannelId, ctx.chat.id, ctx.message.message_id);
+              } else {
+                res = await ctx.api.copyMessage(backupChannelId, ctx.chat.id, ctx.message.message_id, {
+                  caption: caption ? `${caption}\n\n📄 الملف: ${fileName}` : `📄 الملف: ${fileName}`,
+                });
+              }
               if (res?.message_id) backupMsgId = res.message_id;
             } catch (e) {
               try {
@@ -2217,6 +2316,22 @@ export default {
 
         if (!rootDept) {
           return ctx.reply("⚠️ لا يمكن تحديد القسم التابع له هذا المجلد.");
+        }
+
+        if (!courseNode) {
+          const children = await getChildNodes(user.current_node_id);
+          if (children.length > 0) {
+            const kb = new InlineKeyboard();
+            for (const c of children) {
+              kb.text(c.title, `pick_task_course:${c.id}`).row();
+            }
+            kb.text("❌ إلغاء", "close_tasks");
+            await ctx.reply("📚 **اختر المادة المراد إضافة تاسك لها:**", {
+              parse_mode: "Markdown",
+              reply_markup: kb,
+            });
+            return;
+          }
         }
 
         const effectiveCourseId = courseNode ? courseNode.id : user.current_node_id;
@@ -2470,19 +2585,72 @@ export default {
         return;
       }
 
+      // Pick Course for adding Weekly Task
+      if (data.startsWith("pick_task_course:")) {
+        const courseId = parseInt(data.replace("pick_task_course:", ""), 10);
+        const course = await env.DB.prepare("SELECT * FROM nodes WHERE id = ?").bind(courseId).first<NodeRow>();
+        if (!course) {
+          await ctx.answerCallbackQuery({ text: "المادة غير موجودة", show_alert: true }).catch(() => {});
+          return;
+        }
+
+        const { rootDept } = await getNodeHierarchy(course.id);
+        if (!rootDept || !(await canManageDept(user, rootDept.id))) {
+          await ctx.answerCallbackQuery({ text: "❌ لا تملك الصلاحية لإضافة تاسك لهذه المادة", show_alert: true }).catch(() => {});
+          return;
+        }
+
+        await ctx.answerCallbackQuery().catch(() => {});
+        await ctx.deleteMessage().catch(() => {});
+
+        await updateUserState(user.telegram_id, "awaiting_task_title", course.id, rootDept.id, course.id);
+        user.bot_state = "awaiting_task_title";
+        user.managed_node_id = rootDept.id;
+        user.pending_target_id = course.id;
+
+        const cancelKeyboard = new Keyboard().text("❌ إلغاء").resized();
+        await ctx.reply(
+          `📅 **إضافة تاسك/تكليف للأسبوع — [${course.title}]:**\n\n` +
+            `✍️ أرسل الآن عنوان التاسك أو التكليف المطلوب:\n` +
+            `(مثال: "تسليم الشيت الثالث — مسائل الـ Syntax Analysis")\n\n` +
+            `اضغط [❌ إلغاء] للتراجع.`,
+          { parse_mode: "Markdown", reply_markup: cancelKeyboard }
+        );
+        return;
+      }
+
       // Download task attachment
       if (data.startsWith("dl_task_")) {
         const taskId = parseInt(data.replace("dl_task_", ""), 10);
         const task = await env.DB.prepare("SELECT * FROM weekly_tasks WHERE id = ?").bind(taskId).first<WeeklyTaskRow>();
         if (!task || !task.attachment_file_id) {
-          await ctx.answerCallbackQuery({ text: "لا يوجد ملف مرفق لهذا التاسك", show_alert: true });
+          await ctx.answerCallbackQuery({ text: "لا يوجد ملف مرفق لهذا التاسك", show_alert: true }).catch(() => {});
           return;
         }
 
-        await ctx.answerCallbackQuery();
-        await ctx.replyWithDocument(task.attachment_file_id, {
-          caption: `📄 **ملف تكليف:** ${task.task_title}\n📌 مادة: ${task.course_title}`,
-        });
+        await ctx.answerCallbackQuery().catch(() => {});
+        const caption = `📎 **ملف التكليف:** ${task.task_title}\n📚 المادة: ${task.course_title}`;
+        const type = task.attachment_type || "document";
+
+        try {
+          if (type === "photo") {
+            await ctx.replyWithPhoto(task.attachment_file_id, { caption, parse_mode: "Markdown" });
+          } else if (type === "video") {
+            await ctx.replyWithVideo(task.attachment_file_id, { caption, parse_mode: "Markdown" });
+          } else {
+            await ctx.replyWithDocument(task.attachment_file_id, { caption, parse_mode: "Markdown" });
+          }
+        } catch (e) {
+          try {
+            await ctx.replyWithPhoto(task.attachment_file_id, { caption, parse_mode: "Markdown" });
+          } catch {
+            try {
+              await ctx.replyWithDocument(task.attachment_file_id, { caption, parse_mode: "Markdown" });
+            } catch (err) {
+              await ctx.reply(`⚠️ تعذر إرسال المرفق: ${(err as any)?.message || "خطأ غير متوقع"}`);
+            }
+          }
+        }
         return;
       }
 
