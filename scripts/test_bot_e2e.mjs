@@ -95,7 +95,13 @@ async function runTests() {
   assertStatus("12. Security: Student blocked from deleting material", await sendCallbackUpdate(STUDENT_ID, "Student", "del_mat_1"));
   assertStatus("13. Security: Student blocked from deleting task", await sendCallbackUpdate(STUDENT_ID, "Student", "del_t_confirm_1"));
 
-  console.log(`\n🎉 Completed ${passed}/13 E2E & Security checks!`);
+  // Test 8: Upload Rollback on Cancel ('❌ إلغاء')
+  assertStatus("14. Enter folder for rollback test", await sendTextUpdate(ADMIN_ID, "Mohamed", "E2E_Test_Node"));
+  assertStatus("15. Start Content Upload", await sendTextUpdate(ADMIN_ID, "Mohamed", "📤 رفع المحتوى هنا"));
+  assertStatus("16. Send temporary uncommitted note", await sendTextUpdate(ADMIN_ID, "Mohamed", "رسالة تجريبية سيتم إلغاؤها"));
+  assertStatus("17. Cancel upload session ('❌ إلغاء') and verify rollback", await sendTextUpdate(ADMIN_ID, "Mohamed", "❌ إلغاء"));
+
+  console.log(`\n🎉 Completed ${passed}/17 E2E & Security checks!`);
 }
 
 runTests();

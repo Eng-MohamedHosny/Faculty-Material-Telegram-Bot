@@ -250,6 +250,46 @@ export default {
       await sendBatchMaterials(ctx, mats, env);
     }
 
+    // Helper function to rollback uncommitted uploads in the current session:
+    async function rollbackUploadSession(ctx: any, env: Env, user: UserRow): Promise<number> {
+      if (user.bot_state !== "uploading" || !user.current_node_id || user.pending_target_id === null) {
+        return 0;
+      }
+
+      const savepointId = user.pending_target_id;
+      const { results: sessionMats } = await env.DB.prepare(
+        `SELECT id, backup_message_id FROM materials 
+         WHERE node_id = ? AND uploaded_by = ? AND id > ?`
+      )
+        .bind(user.current_node_id, user.telegram_id, savepointId)
+        .all<{ id: number; backup_message_id: number | null }>();
+
+      if (!sessionMats || sessionMats.length === 0) {
+        return 0;
+      }
+
+      // 1. Delete from D1 Database immediately
+      await env.DB.prepare(
+        `DELETE FROM materials WHERE node_id = ? AND uploaded_by = ? AND id > ?`
+      )
+        .bind(user.current_node_id, user.telegram_id, savepointId)
+        .run();
+
+      // 2. Delete from Backup Channel in background
+      const backupChannelId = await getBackupChannelId(env);
+      if (backupChannelId) {
+        for (const sm of sessionMats) {
+          if (sm.backup_message_id) {
+            try {
+              await ctx.api.deleteMessage(backupChannelId, sm.backup_message_id);
+            } catch (err) {}
+          }
+        }
+      }
+
+      return sessionMats.length;
+    }
+
     // ================= MESSAGE HANDLER =================
 
     bot.on("message", async (ctx) => {
@@ -258,6 +298,9 @@ export default {
 
       // 1. Switch Mode Button (for Admins/Leaders) -> Opens Top Level Mode Selector
       if (text === "🏠 تبديل الوضع") {
+        if (user.bot_state === "uploading") {
+          await rollbackUploadSession(ctx, env, user);
+        }
         await updateUserState(env, user.telegram_id, "browsing", null, null, null);
         user.bot_state = "browsing";
         user.current_node_id = null;
@@ -269,6 +312,9 @@ export default {
 
       // 2. Home Button ("🏠 الرئيسية") -> Takes user straight to Root Folder View (nodeId = null) in their current view_mode!
       if (text === "🏠 الرئيسية" || text === "الرئيسية") {
+        if (user.bot_state === "uploading") {
+          await rollbackUploadSession(ctx, env, user);
+        }
         await updateUserState(env, user.telegram_id, "browsing", null, null, null);
         user.bot_state = "browsing";
         user.current_node_id = null;
@@ -315,12 +361,20 @@ export default {
       }
 
       if (isNavCancel && user.bot_state !== "browsing") {
+        let rolledBackCount = 0;
+        if (user.bot_state === "uploading") {
+          rolledBackCount = await rollbackUploadSession(ctx, env, user);
+        }
         await updateUserState(env, user.telegram_id, "browsing", user.current_node_id, null, null);
         user.bot_state = "browsing";
         user.managed_node_id = null;
         user.pending_target_id = null;
         if (!text || !text.startsWith("/")) {
-          await ctx.reply("تم الإلغاء والعودة إلى وضع التصفح.");
+          const cancelMsg =
+            rolledBackCount > 0
+              ? `❌ تم إلغاء الرفع والتراجع عن حفظ (${rolledBackCount}) عنصر وحذفه من القناة.`
+              : "تم الإلغاء والعودة إلى وضع التصفح.";
+          await ctx.reply(cancelMsg);
           await renderFolderView(ctx, user, user.current_node_id, env);
           return;
         }
@@ -369,6 +423,7 @@ export default {
         if (!deptId || !(await canManage(env, user, deptId))) {
           await updateUserState(env, user.telegram_id, "browsing", user.current_node_id, null, null);
           user.bot_state = "browsing";
+          user.pending_target_id = null;
           return ctx.reply("❌ تم إلغاء الإشعار: صلاحية غير متوفرة أو معرف القسم غير محدد.");
         }
 
@@ -416,6 +471,7 @@ export default {
         if (user.role !== "super_admin") {
           await updateUserState(env, user.telegram_id, "browsing", user.current_node_id, null, null);
           user.bot_state = "browsing";
+          user.pending_target_id = null;
           return ctx.reply("❌ غير مصرح لك بإرسال هذا الإشعار.");
         }
 
@@ -459,6 +515,7 @@ export default {
         if (!courseId) {
           await updateUserState(env, user.telegram_id, "browsing", user.current_node_id, null, null);
           user.bot_state = "browsing";
+          user.pending_target_id = null;
           return ctx.reply("حدث خطأ.");
         }
 
@@ -578,6 +635,7 @@ export default {
         if (!sub) {
           await updateUserState(env, user.telegram_id, "browsing", user.current_node_id, null, null);
           user.bot_state = "browsing";
+          user.pending_target_id = null;
           return ctx.reply("المساهمة لم تعد موجودة.");
         }
 
@@ -677,6 +735,7 @@ export default {
         if (!draftRow?.value) {
           await updateUserState(env, user.telegram_id, "browsing", user.current_node_id, null, null);
           user.bot_state = "browsing";
+          user.pending_target_id = null;
           return ctx.reply("حدث خطأ.");
         }
 
@@ -711,6 +770,7 @@ export default {
         if (!draftRow?.value) {
           await updateUserState(env, user.telegram_id, "browsing", user.current_node_id, null, null);
           user.bot_state = "browsing";
+          user.pending_target_id = null;
           return ctx.reply("حدث خطأ.");
         }
 
@@ -849,6 +909,7 @@ export default {
 
           await updateUserState(env, user.telegram_id, "browsing", user.current_node_id, null, null);
           user.bot_state = "browsing";
+          user.pending_target_id = null;
 
           if (rootDept && user.current_node_id) {
             const inlineBtn = new InlineKeyboard().text(
@@ -890,6 +951,17 @@ export default {
           fileName = ctx.message.audio.file_name || "Audio.mp3";
           fileType = "audio";
         } else if (ctx.message.text) {
+          const rawText = ctx.message.text.trim();
+          if (
+            isReservedButton(rawText) ||
+            rawText.includes("اختر من القوائم") ||
+            rawText.includes("الملفات المتاحة") ||
+            rawText.includes("وضع الرفع نشط")
+          ) {
+            return ctx.reply(
+              "⚠️ أنت الآن في وضع رفع المحتوى. أرسل المحتوى المطلوب ثم اضغط [✅ إنهاء الحفظ]، أو اضغط [❌ إلغاء] للتراجع."
+            );
+          }
           fileId = "text_content";
           fileType = "text";
           caption = ctx.message.text;
@@ -950,6 +1022,7 @@ export default {
 
           await updateUserState(env, user.telegram_id, "browsing", user.current_node_id, null, null);
           user.bot_state = "browsing";
+          user.pending_target_id = null;
           user.managed_node_id = null;
 
           await ctx.reply(`✅ تم تعديل الاسم بنجاح من:\n**${oldTitle}** ⬅️ **${cleanTitle}**`, {
@@ -985,6 +1058,7 @@ export default {
 
           await updateUserState(env, user.telegram_id, "browsing", user.current_node_id, null, null);
           user.bot_state = "browsing";
+          user.pending_target_id = null;
 
           await ctx.reply(`✅ تمت إضافة الخانة/المادة **[${cleanTitle}]** بنجاح.`, {
             parse_mode: "Markdown",
@@ -1165,20 +1239,24 @@ export default {
           .bind(user.current_node_id)
           .first<{ title: string }>();
 
-        await updateUserState(env, user.telegram_id, "uploading", user.current_node_id, null, null);
+        // Record the current maximum material ID as the transaction savepoint!
+        const maxMatRow = await env.DB.prepare("SELECT COALESCE(MAX(id), 0) as max_id FROM materials")
+          .first<{ max_id: number }>();
+        const sessionSavepointId = maxMatRow?.max_id ?? 0;
+
+        await updateUserState(env, user.telegram_id, "uploading", user.current_node_id, null, sessionSavepointId);
         user.bot_state = "uploading";
-        const uploadKeyboard = new Keyboard()
-          .text("✅ إنهاء الحفظ")
-          .row()
-          .text("❌ إلغاء")
-          .resized();
+        user.pending_target_id = sessionSavepointId;
+
+        const uploadKeyboard = new Keyboard().text("✅ إنهاء الحفظ").row().text("❌ إلغاء").resized();
         await ctx.reply(
           `📤 **وضع رفع المحتوى نشط الآن في مجلد: [${currentFolder?.title || "الحالي"}]**\n\n` +
             `قم بإرسال أو تحويل (Forward) أي محتوى هنا دفعة واحدة:\n` +
             `• 📄 ملفات PDF أو مستندات\n` +
             `• 🖼️ صور أو 🎥 فيديوهات أو 🎧 صوتيات\n` +
             `• 💬 رسائل نصية أو 🔗 روابط\n\n` +
-            `وعند الانتهاء اضغط زر **[✅ إنهاء الحفظ]** أو **[❌ إلغاء]**.`,
+            `• اضغط **[✅ إنهاء الحفظ]** لاعتماد وحفظ ما أرسلته.\n` +
+            `• أو اضغط **[❌ إلغاء]** للتراجع وحذف كل ما أرسلته في هذه الجلسة.`,
           { parse_mode: "Markdown", reply_markup: uploadKeyboard }
         );
         return;
@@ -1353,15 +1431,21 @@ export default {
       // Admin Guide Callbacks
       if (data === "upload_admin_guide" && user.role === "super_admin") {
         await ensureAdminGuideNode(env);
-        await updateUserState(env, user.telegram_id, "uploading", ADMIN_GUIDE_NODE_ID, null, null);
+        const maxMatRow = await env.DB.prepare("SELECT COALESCE(MAX(id), 0) as max_id FROM materials")
+          .first<{ max_id: number }>();
+        const sessionSavepointId = maxMatRow?.max_id ?? 0;
+
+        await updateUserState(env, user.telegram_id, "uploading", ADMIN_GUIDE_NODE_ID, null, sessionSavepointId);
         user.bot_state = "uploading";
         user.current_node_id = ADMIN_GUIDE_NODE_ID;
-        await ctx.answerCallbackQuery();
+        user.pending_target_id = sessionSavepointId;
+        await ctx.answerCallbackQuery().catch(() => {});
         const uploadKeyboard = new Keyboard().text("✅ إنهاء الحفظ").row().text("❌ إلغاء").resized();
         await ctx.reply(
           `📤 **رفع شرح استخدام البوت (للمشرفين):**\n\n` +
-            `أرسل الآن فيديو الشرح، أو الصور، أو الرسائل النصية والروابط.\n` +
-            `وعند الانتهاء اضغط **[✅ إنهاء الحفظ]**.`,
+            `أرسل الآن فيديو الشرح، أو الصور، أو الرسائل النصية والروابط.\n\n` +
+            `• اضغط **[✅ إنهاء الحفظ]** لاعتماد وحفظ ما أرسلته.\n` +
+            `• أو اضغط **[❌ إلغاء]** للتراجع وحذف كل ما أرسلته في هذه الجلسة.`,
           { parse_mode: "Markdown", reply_markup: uploadKeyboard }
         );
         return;
