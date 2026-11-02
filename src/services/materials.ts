@@ -8,7 +8,7 @@ export async function backupSubmissionToChannel(
   sub: SubmissionRow,
   targetFolderTitle: string
 ): Promise<number | null> {
-  const backupChannelId = getBackupChannelId(env);
+  const backupChannelId = await getBackupChannelId(env);
   if (!backupChannelId) return null;
 
   const backupCaption =
@@ -52,7 +52,7 @@ export async function sendBatchMaterials(ctx: any, materials: MaterialRow[], env
   const textMaterials = materials.filter((m) => m.file_type === "text");
   const mediaMaterials = materials.filter((m) => m.file_type !== "text");
 
-  const backupChannelId = getBackupChannelId(env);
+  const backupChannelId = await getBackupChannelId(env);
 
   for (const tm of textMaterials) {
     let sent = false;

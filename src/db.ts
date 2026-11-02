@@ -1,7 +1,32 @@
 import { Env, UserRow, NodeRow, MaterialRow, FolderWithMaterials, isReservedButton } from "./types";
 
-export function getBackupChannelId(env: Env): string | null {
-  return env.BACKUP_CHANNEL_ID || null;
+let cachedBackupChannelId: string | null = null;
+
+export function setCachedBackupChannelId(channelId: string | null) {
+  cachedBackupChannelId = channelId;
+}
+
+export async function getBackupChannelId(env: Env): Promise<string | null> {
+  if (cachedBackupChannelId) return cachedBackupChannelId;
+  if (env.BACKUP_CHANNEL_ID) {
+    cachedBackupChannelId = env.BACKUP_CHANNEL_ID;
+    return cachedBackupChannelId;
+  }
+  try {
+    const row = await env.DB.prepare("SELECT value FROM settings WHERE key = 'backup_channel_id'")
+      .first<{ value: string }>();
+    if (row?.value) {
+      cachedBackupChannelId = row.value;
+      return cachedBackupChannelId;
+    }
+  } catch (e) {}
+  return null;
+}
+
+export async function ensureAdminGuideNode(env: Env): Promise<void> {
+  await env.DB.prepare(
+    "INSERT OR IGNORE INTO nodes (id, parent_id, title, sort_order, is_full_width) VALUES (-100, NULL, '🎥 شرح استخدام البوت (للمشرفين)', 0, 1)"
+  ).run();
 }
 
 export async function getUser(env: Env, telegramId: number, fullName?: string): Promise<UserRow> {
@@ -186,12 +211,12 @@ export async function handleFolderCreateOrRename(
 export async function getChildNodes(env: Env, parentId: number | null): Promise<NodeRow[]> {
   if (parentId === null) {
     const { results } = await env.DB.prepare(
-      "SELECT * FROM nodes WHERE parent_id IS NULL ORDER BY sort_order ASC, id ASC"
+      "SELECT * FROM nodes WHERE parent_id IS NULL AND id > 0 ORDER BY sort_order ASC, id ASC"
     ).all<NodeRow>();
     return results || [];
   } else {
     const { results } = await env.DB.prepare(
-      "SELECT * FROM nodes WHERE parent_id = ? ORDER BY sort_order ASC, id ASC"
+      "SELECT * FROM nodes WHERE parent_id = ? AND id > 0 ORDER BY sort_order ASC, id ASC"
     )
       .bind(parentId)
       .all<NodeRow>();

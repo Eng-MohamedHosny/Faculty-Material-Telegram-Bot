@@ -109,8 +109,10 @@ export async function renderFolderView(ctx: any, user: UserRow, nodeId: number |
       .row();
 
     if (privileged) {
+      rootStudentKb.text("🎥 شرح استخدام البوت (للمشرفين)").row();
       rootStudentKb.text("🏠 تبديل الوضع").row();
     }
+    rootStudentKb.text("ℹ️ عن البوت").row();
     rootStudentKb.resized();
 
     await ctx.reply(
@@ -177,9 +179,9 @@ export async function renderFolderView(ctx: any, user: UserRow, nodeId: number |
     }
   }
 
-  // Only show "📥 إرسال الملفات" if this folder actually has direct materials AND children
+  // Only show "📥 عرض المحتوى والملفات" if this folder actually has direct materials AND children
   if (materials.length > 0 && children.length > 0) {
-    keyboard.text("📥 إرسال الملفات").row();
+    keyboard.text("📥 عرض المحتوى والملفات").row();
   }
 
   // Student Contribution button: ONLY on the Course level (where sections like المحاضرات, السكاشن, الملخصات are listed)
@@ -189,7 +191,7 @@ export async function renderFolderView(ctx: any, user: UserRow, nodeId: number |
 
   if (isManager && nodeId !== null) {
     keyboard
-      .text("📤 رفع ملفات هنا")
+      .text("📤 رفع المحتوى هنا")
       .text("➕ إضافة خانة/مادة")
       .row()
       .text("✏️ تعديل الاسم")
@@ -204,6 +206,12 @@ export async function renderFolderView(ctx: any, user: UserRow, nodeId: number |
     keyboard
       .text("➕ إضافة قسم جديد")
       .text("📐 تخصيص العرض والصفوف")
+      .row()
+      .text("🎥 شرح استخدام البوت (للمشرفين)")
+      .row()
+      .text("🏠 تبديل الوضع")
+      .row()
+      .text("ℹ️ عن البوت")
       .row();
   }
 
@@ -211,6 +219,9 @@ export async function renderFolderView(ctx: any, user: UserRow, nodeId: number |
     keyboard.text("⬅️ رجوع").text("🏠 الرئيسية").row();
   } else if (privileged) {
     keyboard.text("🏠 تبديل الوضع").row();
+    keyboard.text("ℹ️ عن البوت").row();
+  } else {
+    keyboard.text("ℹ️ عن البوت").row();
   }
 
   if (children.length > 0) {
@@ -272,6 +283,10 @@ export async function renderTopLevel(ctx: any, user: UserRow, env: Env): Promise
       .text("🎓 وضع الطالب (تصفح المقررات)")
       .row()
       .text("⚙️ وضع المشرف (الإدارة والتحكم)")
+      .row()
+      .text("🎥 شرح استخدام البوت (للمشرفين)")
+      .row()
+      .text("ℹ️ عن البوت")
       .resized();
 
     await ctx.reply(

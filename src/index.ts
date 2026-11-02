@@ -9,9 +9,12 @@ import {
   isReservedButton,
   computeEndOfDayDueDate,
   formatTaskDeadlineArabic,
+  ADMIN_GUIDE_NODE_ID,
 } from "./types";
 import {
   getBackupChannelId,
+  setCachedBackupChannelId,
+  ensureAdminGuideNode,
   getUser,
   updateUserState,
   canManage,
@@ -55,7 +58,14 @@ export default {
 
   async fetch(request: Request, env: Env, executionCtx: ExecutionContext): Promise<Response> {
     if (request.method !== "POST") {
-      return new Response("FCAI Telegram Bot Worker v3.1 is running smoothly 🚀", { status: 200 });
+      return new Response("FCAI Telegram Bot Worker v3.2 is running smoothly 🚀", { status: 200 });
+    }
+
+    if (env.WEBHOOK_SECRET) {
+      const secretHeader = request.headers.get("X-Telegram-Bot-Api-Secret-Token");
+      if (secretHeader !== env.WEBHOOK_SECRET) {
+        return new Response("Unauthorized", { status: 403 });
+      }
     }
 
     const bot = new Bot(env.BOT_TOKEN);
@@ -66,6 +76,7 @@ export default {
 
     bot.on("channel_post", async (ctx) => {
       const channelId = ctx.chat.id.toString();
+      setCachedBackupChannelId(channelId);
       await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('backup_channel_id', ?)")
         .bind(channelId)
         .run();
@@ -208,13 +219,90 @@ export default {
       await ctx.reply(`✅ تم تخفيض رتبة المستخدم (${targetId}) إلى Student وحذف كافة صلاحياته.`);
     });
 
+    // ================= ADMIN GUIDE HELPER =================
+
+    async function renderAdminGuide(ctx: any, user: UserRow) {
+      await ensureAdminGuideNode(env);
+      const mats = await getNodeMaterials(env, ADMIN_GUIDE_NODE_ID);
+
+      const kb = new InlineKeyboard();
+      if (user.role === "super_admin") {
+        kb.text("📤 رفع المحتوى هنا (فيديو/نص الشرح)", "upload_admin_guide").row();
+        if (mats.length > 0) {
+          kb.text("🗑️ مسح شرح المشرفين الحالي", "delete_admin_guide").row();
+        }
+      }
+
+      if (mats.length === 0) {
+        await ctx.reply(
+          `🎥 **شرح استخدام البوت للمشرفين والليدرات:**\n\n` +
+            `لم يتم رفع فيديو الشرح بعد.` +
+            (user.role === "super_admin" ? `\n\n👑 بصفتك المسؤول العام، اضغط الزر بالأسفل لرفع فيديو الشرح أو التعليمات النصية:` : ""),
+          { parse_mode: "Markdown", reply_markup: user.role === "super_admin" ? kb : undefined }
+        );
+        return;
+      }
+
+      await ctx.reply(`🎥 **دليل وشرح استخدام البوت للمشرفين والليدرات 👇**`, {
+        parse_mode: "Markdown",
+        reply_markup: user.role === "super_admin" ? kb : undefined,
+      });
+      await sendBatchMaterials(ctx, mats, env);
+    }
+
     // ================= MESSAGE HANDLER =================
 
     bot.on("message", async (ctx) => {
       const user = await getUser(env, ctx.from!.id, ctx.from!.first_name);
       const text = ctx.message.text?.trim();
 
-      // Priority 1: Navigation & Cancellation Guard
+      // 1. ABSOLUTE PRIORITY: Mode Switch & Home ALWAYS take user to Root
+      if (text === "🏠 تبديل الوضع" && isPrivileged(user)) {
+        const newMode = user.view_mode === "admin" ? "student" : "admin";
+        await updateUserState(env, user.telegram_id, "browsing", null, null, null);
+        await env.DB.prepare("UPDATE users SET view_mode = ?, current_node_id = NULL WHERE telegram_id = ?")
+          .bind(newMode, user.telegram_id)
+          .run();
+        user.bot_state = "browsing";
+        user.view_mode = newMode;
+        user.current_node_id = null;
+        user.managed_node_id = null;
+        user.pending_target_id = null;
+        await ctx.reply(`✅ تم التبديل إلى وضع: ${newMode === "admin" ? "⚙️ المشرف" : "🎓 الطالب"}`);
+        await renderFolderView(ctx, user, null, env);
+        return;
+      }
+
+      if (text === "🏠 الرئيسية" || text === "الرئيسية") {
+        await updateUserState(env, user.telegram_id, "browsing", null, null, null);
+        user.bot_state = "browsing";
+        user.current_node_id = null;
+        user.managed_node_id = null;
+        user.pending_target_id = null;
+        await renderTopLevel(ctx, user, env);
+        return;
+      }
+
+      // 2. About Bot Button (Available at Root for everyone)
+      if (text === "ℹ️ عن البوت") {
+        const aboutKb = new InlineKeyboard()
+          .url("🔗 Eng-Mohamed Hosny — LinkedIn", "https://www.linkedin.com/in/eng-mohamedhosny");
+        await ctx.reply(
+          `🎓 <b>أهلاً بكم في بوت الـ Material الخاص بـ FCAI Sohag</b>\n\n` +
+            `تم عمل هذا البوت بواسطة <a href="https://www.linkedin.com/in/eng-mohamedhosny">Eng-Mohamed Hosny</a>\n\n` +
+            `أتمنى أن البوت يفيدكم، ويا ريت دعوة بظهر الغيب لأخوكم. وشكراً ❤️`,
+          { parse_mode: "HTML", link_preview_options: { is_disabled: true }, reply_markup: aboutKb }
+        );
+        return;
+      }
+
+      // 3. Admin Guide Button (Available at Root for Leaders & Super Admin)
+      if (text === "🎥 شرح استخدام البوت (للمشرفين)" && isPrivileged(user)) {
+        await renderAdminGuide(ctx, user);
+        return;
+      }
+
+      // 4. Cancellation Guard for active input states (excluding Home which is already handled above)
       let isNavCancel = false;
       if (user.bot_state === "uploading") {
         isNavCancel =
@@ -226,8 +314,6 @@ export default {
           !!text &&
           (text.includes("إلغاء") ||
             text.includes("رجوع") ||
-            text.includes("الرئيسية") ||
-            text.includes("تبديل الوضع") ||
             (text.startsWith("/") && !text.startsWith("/promote") && !text.startsWith("/demote")));
       }
 
@@ -276,18 +362,6 @@ export default {
         user.view_mode = "admin";
         user.current_node_id = null;
         await ctx.reply("✅ تم التبديل إلى وضع المشرف.");
-        await renderFolderView(ctx, user, null, env);
-        return;
-      }
-
-      if (text === "🏠 تبديل الوضع" && isPrivileged(user)) {
-        const newMode = user.view_mode === "admin" ? "student" : "admin";
-        await env.DB.prepare("UPDATE users SET view_mode = ?, current_node_id = NULL WHERE telegram_id = ?")
-          .bind(newMode, user.telegram_id)
-          .run();
-        user.view_mode = newMode;
-        user.current_node_id = null;
-        await ctx.reply(`✅ تم التبديل إلى وضع: ${newMode === "admin" ? "⚙️ المشرف" : "🎓 الطالب"}`);
         await renderFolderView(ctx, user, null, env);
         return;
       }
@@ -828,7 +902,7 @@ export default {
 
         if (fileId && user.current_node_id) {
           let backupMsgId: number | null = null;
-          const backupChannelId = getBackupChannelId(env);
+          const backupChannelId = await getBackupChannelId(env);
           if (backupChannelId) {
             try {
               let res: any;
@@ -1085,11 +1159,15 @@ export default {
         return;
       }
 
-      // Admin Action: Upload Files (Bug 2 Fixed: row with ❌ إلغاء added)
-      if (text === "📤 رفع ملفات هنا" && (await canManage(env, user, user.current_node_id))) {
+      // Admin Action: Upload Content (Supports Files, Media, Text & Links)
+      if ((text === "📤 رفع المحتوى هنا" || text === "📤 رفع ملفات هنا") && (await canManage(env, user, user.current_node_id))) {
         if (!user.current_node_id) {
-          return ctx.reply("❌ لا يمكن رفع ملفات في الصفحة الرئيسية، يرجى الدخول لمادة أو خانة أولاً.");
+          return ctx.reply("❌ لا يمكن رفع محتوى في الصفحة الرئيسية، يرجى الدخول لمادة أو خانة أولاً.");
         }
+        const currentFolder = await env.DB.prepare("SELECT title FROM nodes WHERE id = ?")
+          .bind(user.current_node_id)
+          .first<{ title: string }>();
+
         await updateUserState(env, user.telegram_id, "uploading", user.current_node_id, null, null);
         user.bot_state = "uploading";
         const uploadKeyboard = new Keyboard()
@@ -1098,7 +1176,12 @@ export default {
           .text("❌ إلغاء")
           .resized();
         await ctx.reply(
-          `📤 **وضع الرفع نشط الآن:**\n\nقم بإرسال أو تحويل (Forward) كل ملفات الـ PDF أو الفيديوهات أو الصور أو الرسائل النصية هنا دفعة واحدة.\n\nوعند الانتهاء اضغط زر **[✅ إنهاء الحفظ]** أو **[❌ إلغاء]**.`,
+          `📤 **وضع رفع المحتوى نشط الآن في مجلد: [${currentFolder?.title || "الحالي"}]**\n\n` +
+            `قم بإرسال أو تحويل (Forward) أي محتوى هنا دفعة واحدة:\n` +
+            `• 📄 ملفات PDF أو مستندات\n` +
+            `• 🖼️ صور أو 🎥 فيديوهات أو 🎧 صوتيات\n` +
+            `• 💬 رسائل نصية أو 🔗 روابط\n\n` +
+            `وعند الانتهاء اضغط زر **[✅ إنهاء الحفظ]** أو **[❌ إلغاء]**.`,
           { parse_mode: "Markdown", reply_markup: uploadKeyboard }
         );
         return;
@@ -1153,13 +1236,13 @@ export default {
         return;
       }
 
-      // Admin Action: Send Files in Node
-      if (text === "📥 إرسال الملفات" && user.current_node_id) {
+      // Admin Action: Send Content in Node
+      if ((text === "📥 عرض المحتوى والملفات" || text === "📥 إرسال الملفات") && user.current_node_id) {
         const materials = await getNodeMaterials(env, user.current_node_id);
         if (materials.length > 0) {
           await sendBatchMaterials(ctx, materials, env);
         } else {
-          await ctx.reply("لا توجد ملفات في هذا المجلد بعد.");
+          await ctx.reply("لا يوجد محتوى في هذا المجلد بعد.");
         }
         return;
       }
@@ -1192,17 +1275,25 @@ export default {
           .first<NodeRow>();
 
         if (childNode) {
-          const grandChildren = await getChildNodes(env, childNode.id);
-          if (grandChildren.length === 0) {
+          const subChildrenCount = await env.DB.prepare(
+            "SELECT COUNT(*) as count FROM nodes WHERE parent_id = ?"
+          ).bind(childNode.id).first<{ count: number }>();
+
+          const hasSubfolders = Boolean(subChildrenCount && subChildrenCount.count > 0);
+          const userCanManageChild = await canManage(env, user, childNode.id);
+
+          // Only stay outside if user is NOT in admin manage mode AND folder has no subfolders
+          if (!userCanManageChild && !hasSubfolders) {
             const mats = await getNodeMaterials(env, childNode.id);
             if (mats.length > 0) {
               await sendBatchMaterials(ctx, mats, env);
             } else {
-              await ctx.reply(`لا توجد ملفات في ${childNode.title} بعد.`);
+              await ctx.reply(`لا يوجد محتوى في ${childNode.title} بعد.`);
             }
             return;
           }
 
+          // Navigate inside the folder and update current_node_id!
           await updateUserState(env, user.telegram_id, "browsing", childNode.id, null, null);
           user.current_node_id = childNode.id;
           await renderFolderView(ctx, user, childNode.id, env);
@@ -1259,6 +1350,42 @@ export default {
           text: `🧹 تم تنظيف (${delFolderRes.meta?.changes || 0}) مجلد و (${delMatRes.meta?.changes || 0}) ملف خاطئ!`,
           show_alert: true,
         });
+        return;
+      }
+
+      // Admin Guide Callbacks
+      if (data === "upload_admin_guide" && user.role === "super_admin") {
+        await ensureAdminGuideNode(env);
+        await updateUserState(env, user.telegram_id, "uploading", ADMIN_GUIDE_NODE_ID, null, null);
+        user.bot_state = "uploading";
+        user.current_node_id = ADMIN_GUIDE_NODE_ID;
+        await ctx.answerCallbackQuery();
+        const uploadKeyboard = new Keyboard().text("✅ إنهاء الحفظ").row().text("❌ إلغاء").resized();
+        await ctx.reply(
+          `📤 **رفع شرح استخدام البوت (للمشرفين):**\n\n` +
+            `أرسل الآن فيديو الشرح، أو الصور، أو الرسائل النصية والروابط.\n` +
+            `وعند الانتهاء اضغط **[✅ إنهاء الحفظ]**.`,
+          { parse_mode: "Markdown", reply_markup: uploadKeyboard }
+        );
+        return;
+      }
+
+      if (data === "delete_admin_guide" && user.role === "super_admin") {
+        await ctx.answerCallbackQuery();
+        const mats = await getNodeMaterials(env, ADMIN_GUIDE_NODE_ID);
+        if (mats.length === 0) {
+          await ctx.reply("لا يوجد محتوى لحذفه من دليل المشرفين.");
+          return;
+        }
+        const kb = new InlineKeyboard();
+        for (const m of mats) {
+          const label = m.caption
+            ? (m.caption.length > 25 ? m.caption.slice(0, 25) + "..." : m.caption)
+            : (m.file_name || `عنصر #${m.id}`);
+          kb.text(`🗑️ ${label}`, `del_mat_${m.id}`).row();
+        }
+        kb.text("❌ إغلاق", "close_delete");
+        await ctx.reply("اختر العنصر المراد حذفه من دليل المشرفين:", { reply_markup: kb });
         return;
       }
 
@@ -1354,6 +1481,10 @@ export default {
       // Manage Weekly Tasks list for Department (Bug 5 Fixed: no outer answerCallbackQuery)
       if (data.startsWith("manage_tasks_")) {
         const deptId = parseInt(data.replace("manage_tasks_", ""), 10);
+        if (!(await canManageDept(env, user, deptId))) {
+          await ctx.answerCallbackQuery({ text: "❌ لا تملك صلاحية إدارة مهام هذا القسم.", show_alert: true }).catch(() => {});
+          return;
+        }
         await renderTaskManagementList(ctx, deptId, user, env);
         return;
       }
@@ -1361,7 +1492,7 @@ export default {
       // Back to Weekly Tasks list
       if (data.startsWith("back_to_tasks_")) {
         const deptId = parseInt(data.replace("back_to_tasks_", ""), 10);
-        await ctx.answerCallbackQuery();
+        await ctx.answerCallbackQuery().catch(() => {});
         await renderWeeklyTasks(ctx, user, env, deptId);
         return;
       }
@@ -1369,6 +1500,11 @@ export default {
       // Single Task Management Menu (Bug 5 Fixed: no outer answerCallbackQuery)
       if (data.startsWith("task_menu_")) {
         const taskId = parseInt(data.replace("task_menu_", ""), 10);
+        const task = await env.DB.prepare("SELECT dept_node_id FROM weekly_tasks WHERE id = ?").bind(taskId).first<{ dept_node_id: number }>();
+        if (!task || !(await canManageDept(env, user, task.dept_node_id))) {
+          await ctx.answerCallbackQuery({ text: "❌ لا تملك الصلاحية لإدارة هذا التاسك.", show_alert: true }).catch(() => {});
+          return;
+        }
         await renderSingleTaskEditor(ctx, taskId, user, env);
         return;
       }
@@ -1376,6 +1512,11 @@ export default {
       // Edit Task Title Prompt
       if (data.startsWith("edit_t_title_")) {
         const taskId = parseInt(data.replace("edit_t_title_", ""), 10);
+        const task = await env.DB.prepare("SELECT dept_node_id FROM weekly_tasks WHERE id = ?").bind(taskId).first<{ dept_node_id: number }>();
+        if (!task || !(await canManageDept(env, user, task.dept_node_id))) {
+          await ctx.answerCallbackQuery({ text: "❌ لا تملك الصلاحية لتعديل مهام هذا القسم.", show_alert: true }).catch(() => {});
+          return;
+        }
         await updateUserState(env, user.telegram_id, "awaiting_edit_task_title", user.current_node_id, null, taskId);
         user.bot_state = "awaiting_edit_task_title";
         user.pending_target_id = taskId;
@@ -1391,6 +1532,11 @@ export default {
       // Edit Task Days Prompt
       if (data.startsWith("edit_t_days_")) {
         const taskId = parseInt(data.replace("edit_t_days_", ""), 10);
+        const task = await env.DB.prepare("SELECT dept_node_id FROM weekly_tasks WHERE id = ?").bind(taskId).first<{ dept_node_id: number }>();
+        if (!task || !(await canManageDept(env, user, task.dept_node_id))) {
+          await ctx.answerCallbackQuery({ text: "❌ لا تملك الصلاحية لتعديل مهام هذا القسم.", show_alert: true }).catch(() => {});
+          return;
+        }
         await updateUserState(env, user.telegram_id, "awaiting_edit_task_days", user.current_node_id, null, taskId);
         user.bot_state = "awaiting_edit_task_days";
         user.pending_target_id = taskId;
@@ -1406,6 +1552,11 @@ export default {
       // Edit Task File Prompt
       if (data.startsWith("edit_t_file_")) {
         const taskId = parseInt(data.replace("edit_t_file_", ""), 10);
+        const task = await env.DB.prepare("SELECT dept_node_id FROM weekly_tasks WHERE id = ?").bind(taskId).first<{ dept_node_id: number }>();
+        if (!task || !(await canManageDept(env, user, task.dept_node_id))) {
+          await ctx.answerCallbackQuery({ text: "❌ لا تملك الصلاحية لتعديل مهام هذا القسم.", show_alert: true }).catch(() => {});
+          return;
+        }
         await updateUserState(env, user.telegram_id, "awaiting_edit_task_file", user.current_node_id, null, taskId);
         user.bot_state = "awaiting_edit_task_file";
         user.pending_target_id = taskId;
@@ -1421,8 +1572,13 @@ export default {
       // Remove Task File Attachment
       if (data.startsWith("remove_t_file_")) {
         const taskId = parseInt(data.replace("remove_t_file_", ""), 10);
+        const task = await env.DB.prepare("SELECT dept_node_id FROM weekly_tasks WHERE id = ?").bind(taskId).first<{ dept_node_id: number }>();
+        if (!task || !(await canManageDept(env, user, task.dept_node_id))) {
+          await ctx.answerCallbackQuery({ text: "❌ لا تملك الصلاحية لتعديل مهام هذا القسم.", show_alert: true }).catch(() => {});
+          return;
+        }
         await env.DB.prepare("UPDATE weekly_tasks SET attachment_file_id = NULL WHERE id = ?").bind(taskId).run();
-        await ctx.answerCallbackQuery({ text: "✅ تم حذف الملف المرفق من التاسك." });
+        await ctx.answerCallbackQuery({ text: "✅ تم حذف الملف المرفق من التاسك." }).catch(() => {});
         await renderSingleTaskEditor(ctx, taskId, user, env);
         return;
       }
@@ -1432,7 +1588,11 @@ export default {
         const taskId = parseInt(data.replace("del_t_prompt_", ""), 10);
         const task = await env.DB.prepare("SELECT * FROM weekly_tasks WHERE id = ?").bind(taskId).first<WeeklyTaskRow>();
         if (!task) {
-          await ctx.answerCallbackQuery({ text: "التاسك غير موجود", show_alert: true });
+          await ctx.answerCallbackQuery({ text: "التاسك غير موجود", show_alert: true }).catch(() => {});
+          return;
+        }
+        if (!(await canManageDept(env, user, task.dept_node_id))) {
+          await ctx.answerCallbackQuery({ text: "❌ لا تملك الصلاحية لحذف مهام هذا القسم.", show_alert: true }).catch(() => {});
           return;
         }
 
@@ -1455,13 +1615,13 @@ export default {
       if (data.startsWith("del_t_confirm_")) {
         const taskId = parseInt(data.replace("del_t_confirm_", ""), 10);
         const task = await env.DB.prepare("SELECT dept_node_id FROM weekly_tasks WHERE id = ?").bind(taskId).first<{ dept_node_id: number }>();
-        await env.DB.prepare("DELETE FROM weekly_tasks WHERE id = ?").bind(taskId).run();
-        await ctx.answerCallbackQuery({ text: "🗑️ تم حذف التاسك بنجاح!" });
-        if (task) {
-          await renderTaskManagementList(ctx, task.dept_node_id, user, env);
-        } else {
-          await ctx.deleteMessage().catch(() => {});
+        if (!task || !(await canManageDept(env, user, task.dept_node_id))) {
+          await ctx.answerCallbackQuery({ text: "❌ لا تملك الصلاحية لحذف مهام هذا القسم.", show_alert: true }).catch(() => {});
+          return;
         }
+        await env.DB.prepare("DELETE FROM weekly_tasks WHERE id = ?").bind(taskId).run();
+        await ctx.answerCallbackQuery({ text: "🗑️ تم حذف التاسك بنجاح!" }).catch(() => {});
+        await renderTaskManagementList(ctx, task.dept_node_id, user, env);
         return;
       }
 
@@ -1580,7 +1740,7 @@ export default {
 
         if (matId > 0) {
           const deleted = await env.DB.prepare("DELETE FROM materials WHERE id = ? RETURNING backup_message_id").bind(matId).first<{ backup_message_id: number | null }>();
-          const backupChannelId = getBackupChannelId(env);
+          const backupChannelId = await getBackupChannelId(env);
           if (backupChannelId && deleted?.backup_message_id) {
             await bot.api.deleteMessage(backupChannelId, deleted.backup_message_id).catch(() => {});
           }
@@ -1608,7 +1768,7 @@ export default {
 
         if (matId > 0) {
           const deleted = await env.DB.prepare("DELETE FROM materials WHERE id = ? RETURNING backup_message_id").bind(matId).first<{ backup_message_id: number | null }>();
-          const backupChannelId = getBackupChannelId(env);
+          const backupChannelId = await getBackupChannelId(env);
           if (backupChannelId && deleted?.backup_message_id) {
             await bot.api.deleteMessage(backupChannelId, deleted.backup_message_id).catch(() => {});
           }
@@ -1865,7 +2025,7 @@ export default {
       }
 
       if (!(await canManage(env, user, user.current_node_id))) {
-        await ctx.answerCallbackQuery({ text: "❌ لا تملك الصلاحية في هذا القسم", show_alert: true });
+        await ctx.answerCallbackQuery({ text: "❌ لا تملك الصلاحية في هذا القسم", show_alert: true }).catch(() => {});
         return;
       }
 
@@ -2014,7 +2174,7 @@ export default {
 
         const dbPromise = (async () => {
           try {
-            const backupChannelId = getBackupChannelId(env);
+            const backupChannelId = await getBackupChannelId(env);
             if (backupChannelId) {
               executionCtx.waitUntil(
                 (async () => {
@@ -2053,8 +2213,23 @@ export default {
       // Delete material
       if (data.startsWith("del_mat_")) {
         const matId = parseInt(data.replace("del_mat_", ""), 10);
-        if (!(await canManage(env, user, user.current_node_id))) {
-          await ctx.answerCallbackQuery({ text: "❌ لا تملك الصلاحية", show_alert: true });
+        const mat = await env.DB.prepare(
+          "SELECT node_id, backup_message_id FROM materials WHERE id = ?"
+        )
+          .bind(matId)
+          .first<{ node_id: number; backup_message_id: number | null }>();
+
+        if (!mat) {
+          await ctx.answerCallbackQuery({ text: "❌ الملف غير موجود أو تم حذفه مسبقاً.", show_alert: true }).catch(() => {});
+          return;
+        }
+
+        const isAuthorized =
+          (mat.node_id === ADMIN_GUIDE_NODE_ID && user.role === "super_admin") ||
+          (await canManage(env, user, mat.node_id));
+
+        if (!isAuthorized) {
+          await ctx.answerCallbackQuery({ text: "❌ لا تملك الصلاحية لحذف هذا المحتوى.", show_alert: true }).catch(() => {});
           return;
         }
 
@@ -2069,13 +2244,13 @@ export default {
 
         const uiPromise = onlyCloseLeft
           ? Promise.all([
-              ctx.answerCallbackQuery(),
-              ctx.editMessageText("✅ تم حذف جميع العناصر في هذا المجلد.", {
+              ctx.answerCallbackQuery().catch(() => {}),
+              ctx.editMessageText("✅ تم حذف جميع العناصر المحددة.", {
                 reply_markup: new InlineKeyboard().text("❌ إغلاق", "close_delete"),
               }),
             ])
           : Promise.all([
-              ctx.answerCallbackQuery(),
+              ctx.answerCallbackQuery().catch(() => {}),
               ctx.editMessageReplyMarkup({
                 reply_markup: { inline_keyboard: updatedKeyboard },
               }),
@@ -2083,18 +2258,14 @@ export default {
 
         const dbPromise = (async () => {
           try {
-            const deleted = await env.DB.prepare(
-              "DELETE FROM materials WHERE id = ? RETURNING backup_message_id"
-            )
-              .bind(matId)
-              .first<{ backup_message_id: number | null }>();
+            await env.DB.prepare("DELETE FROM materials WHERE id = ?").bind(matId).run();
 
-            const backupChannelId = getBackupChannelId(env);
-            if (backupChannelId && deleted?.backup_message_id) {
+            const backupChannelId = await getBackupChannelId(env);
+            if (backupChannelId && mat.backup_message_id) {
               executionCtx.waitUntil(
                 (async () => {
                   try {
-                    await ctx.api.deleteMessage(backupChannelId, deleted.backup_message_id!);
+                    await ctx.api.deleteMessage(backupChannelId, mat.backup_message_id!);
                   } catch (e) {}
                 })()
               );

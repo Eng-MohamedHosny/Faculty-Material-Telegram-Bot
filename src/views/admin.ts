@@ -125,7 +125,7 @@ export async function renderStats(ctx: any, user: UserRow, env: Env): Promise<vo
 }
 
 export async function renderAdminPanel(ctx: any, env: Env): Promise<void> {
-  const backupChannel = getBackupChannelId(env);
+  const backupChannel = await getBackupChannelId(env);
   const inlineKeyboard = new InlineKeyboard()
     .text("👥 إدارة الليدرز وصلاحيات الأقسام", "admin_list_leaders")
     .row()

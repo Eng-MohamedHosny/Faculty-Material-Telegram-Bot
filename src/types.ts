@@ -3,7 +3,10 @@ export interface Env {
   BOT_TOKEN: string;
   SUPER_ADMIN_ID?: string;
   BACKUP_CHANNEL_ID?: string;
+  WEBHOOK_SECRET?: string;
 }
+
+export const ADMIN_GUIDE_NODE_ID = -100;
 
 export interface UserRow {
   telegram_id: number;
@@ -108,7 +111,8 @@ export const RESERVED_PATTERNS = [
   "إضافة", "رفع", "تعديل", "حذف",
   "تخصيص", "تحميل", "عرض وتحميل",
   "الرئيسية", "القائمة", "وضع", "إعدادات", "الإشعارات",
-  "تاسكات", "ساهم", "إرسال", "اشتراك", "تخطي", "تغيير القسم"
+  "تاسكات", "ساهم", "إرسال", "اشتراك", "تخطي", "تغيير القسم",
+  "عن البوت", "شرح استخدام البوت", "رفع المحتوى"
 ];
 
 export function isReservedButton(text: string): boolean {
