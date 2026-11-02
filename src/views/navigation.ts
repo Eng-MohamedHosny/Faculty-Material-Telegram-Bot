@@ -208,10 +208,6 @@ export async function renderFolderView(ctx: any, user: UserRow, nodeId: number |
       .text("📐 تخصيص العرض والصفوف")
       .row()
       .text("🎥 شرح استخدام البوت (للمشرفين)")
-      .row()
-      .text("🏠 تبديل الوضع")
-      .row()
-      .text("ℹ️ عن البوت")
       .row();
   }
 

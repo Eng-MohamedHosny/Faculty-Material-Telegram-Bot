@@ -58,16 +58,17 @@ export async function sendBatchMaterials(ctx: any, materials: MaterialRow[], env
     let sent = false;
     if (backupChannelId && tm.backup_message_id) {
       try {
-        await ctx.api.copyMessage(ctx.chat.id, backupChannelId, tm.backup_message_id);
+        await ctx.api.copyMessage(ctx.chat!.id, backupChannelId, tm.backup_message_id);
         sent = true;
-      } catch (e) {
+      } catch (err) {
         sent = false;
       }
     }
     if (!sent) {
-      try {
-        await ctx.reply(tm.caption || tm.file_name);
-      } catch (err) {}
+      const actualText = tm.caption || tm.file_name;
+      if (actualText && actualText !== "text_content") {
+        await ctx.reply(actualText); // Plain text without Markdown parse_mode so URLs with '_' never crash
+      }
     }
   }
 

@@ -256,24 +256,8 @@ export default {
       const user = await getUser(env, ctx.from!.id, ctx.from!.first_name);
       const text = ctx.message.text?.trim();
 
-      // 1. ABSOLUTE PRIORITY: Mode Switch & Home ALWAYS take user to Root
-      if (text === "🏠 تبديل الوضع" && isPrivileged(user)) {
-        const newMode = user.view_mode === "admin" ? "student" : "admin";
-        await updateUserState(env, user.telegram_id, "browsing", null, null, null);
-        await env.DB.prepare("UPDATE users SET view_mode = ?, current_node_id = NULL WHERE telegram_id = ?")
-          .bind(newMode, user.telegram_id)
-          .run();
-        user.bot_state = "browsing";
-        user.view_mode = newMode;
-        user.current_node_id = null;
-        user.managed_node_id = null;
-        user.pending_target_id = null;
-        await ctx.reply(`✅ تم التبديل إلى وضع: ${newMode === "admin" ? "⚙️ المشرف" : "🎓 الطالب"}`);
-        await renderFolderView(ctx, user, null, env);
-        return;
-      }
-
-      if (text === "🏠 الرئيسية" || text === "الرئيسية") {
+      // 1. Switch Mode Button (for Admins/Leaders) -> Opens Top Level Mode Selector
+      if (text === "🏠 تبديل الوضع") {
         await updateUserState(env, user.telegram_id, "browsing", null, null, null);
         user.bot_state = "browsing";
         user.current_node_id = null;
@@ -283,12 +267,23 @@ export default {
         return;
       }
 
+      // 2. Home Button ("🏠 الرئيسية") -> Takes user straight to Root Folder View (nodeId = null) in their current view_mode!
+      if (text === "🏠 الرئيسية" || text === "الرئيسية") {
+        await updateUserState(env, user.telegram_id, "browsing", null, null, null);
+        user.bot_state = "browsing";
+        user.current_node_id = null;
+        user.managed_node_id = null;
+        user.pending_target_id = null;
+        await renderFolderView(ctx, user, null, env);
+        return;
+      }
+
       // 2. About Bot Button (Available at Root for everyone)
       if (text === "ℹ️ عن البوت") {
         const aboutKb = new InlineKeyboard()
           .url("🔗 Eng-Mohamed Hosny — LinkedIn", "https://www.linkedin.com/in/eng-mohamedhosny");
         await ctx.reply(
-          `🎓 <b>أهلاً بكم في بوت الـ Material الخاص بـ FCAI Sohag</b>\n\n` +
+          `أهلاً بكم في بوت الـ Material الخاص بـ <b>FCAI Sohag</b> 🎓\n\n` +
             `تم عمل هذا البوت بواسطة <a href="https://www.linkedin.com/in/eng-mohamedhosny">Eng-Mohamed Hosny</a>\n\n` +
             `أتمنى أن البوت يفيدكم، ويا ريت دعوة بظهر الغيب لأخوكم. وشكراً ❤️`,
           { parse_mode: "HTML", link_preview_options: { is_disabled: true }, reply_markup: aboutKb }
@@ -308,6 +303,8 @@ export default {
         isNavCancel =
           text === "❌ إلغاء" ||
           text === "إلغاء" ||
+          text === "⬅️ رجوع" ||
+          text === "رجوع" ||
           (!!text && text.startsWith("/") && !text.startsWith("/promote") && !text.startsWith("/demote"));
       } else {
         isNavCancel =
