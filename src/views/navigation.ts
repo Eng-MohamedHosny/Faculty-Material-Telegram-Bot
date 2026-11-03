@@ -183,12 +183,16 @@ export async function renderFolderView(ctx: any, user: UserRow, nodeId: number |
 
   // تم حذف زر "📥 عرض المحتوى والملفات" نهائياً لمنع ازدواجية الأزرار
 
-  // 2. زر مساهمة الطلاب (يظهر للطلاب فقط داخل المادة)
-  if (!isManager && courseNode !== null) {
+  const isInsideAdminGuide =
+    nodeId === ADMIN_GUIDE_NODE_ID ||
+    (courseNode !== null && courseNode.id === ADMIN_GUIDE_NODE_ID);
+
+  // 2. زر مساهمة الطلاب (يظهر للطلاب فقط داخل المادة الدراسية، ولا يظهر مطلقاً داخل دليل المشرفين)
+  if (!isManager && courseNode !== null && !isInsideAdminGuide) {
     keyboard.text("📝 ساهم بملخص أو امتحان").row();
   }
 
-  const isAdminGuide = nodeId === ADMIN_GUIDE_NODE_ID || hierarchy.courseNode?.id === ADMIN_GUIDE_NODE_ID;
+  const isAdminGuide = isInsideAdminGuide;
 
   if (isManager && nodeId !== null) {
     keyboard
@@ -227,14 +231,17 @@ export async function renderFolderView(ctx: any, user: UserRow, nodeId: number |
     keyboard.text("ℹ️ عن البوت").row();
   }
 
-  if (materials.length > 0) {
-    await sendBatchMaterials(ctx, materials, env);
-  }
-
   if (children.length > 0) {
-    await ctx.reply("اختر من القوائم بالأسفل 👇", {
-      reply_markup: keyboard,
-    });
+    if (materials.length > 0) {
+      await ctx.reply("👇 الملفات والمحتويات المتاحة:", {
+        reply_markup: keyboard,
+      });
+      await sendBatchMaterials(ctx, materials, env);
+    } else {
+      await ctx.reply("اختر من القوائم بالأسفل 👇", {
+        reply_markup: keyboard,
+      });
+    }
   } else if (materials.length === 0) {
     const emptyMsg = isAdminGuide
       ? `🎥 **شرح استخدام البوت للمشرفين والليدرات:**\n\nلم يتم رفع محتوى بعد.` +
@@ -244,27 +251,63 @@ export async function renderFolderView(ctx: any, user: UserRow, nodeId: number |
       reply_markup: keyboard,
     });
   } else {
-    await ctx.reply("الملفات والمحتويات المتاحة أعلاه 👆", {
+    // إرسال رسالة العنوان والكيبورد أولاً قبل المحتوى
+    await ctx.reply("👇 الملفات والمحتويات المتاحة:", {
       reply_markup: keyboard,
     });
+    await sendBatchMaterials(ctx, materials, env);
   }
 }
 
-export function buildWidthCustomizationKeyboard(children: NodeRow[], hasParent: boolean): InlineKeyboard {
+export function buildWidthCustomizationKeyboard(
+  children: NodeRow[],
+  hasParent: boolean,
+  selectedNodeId?: number | null
+): InlineKeyboard {
   const inlineKeyboard = new InlineKeyboard();
+  if (children.length === 0) {
+    inlineKeyboard.text("❌ إغلاق", "close_customization");
+    return inlineKeyboard;
+  }
 
+  // إذا لم يتم تحديد خانة بعد، نحدد الخانة الأولى افتراضياً
+  const activeId =
+    selectedNodeId && children.some((c) => c.id === selectedNodeId)
+      ? selectedNodeId
+      : children[0].id;
+  const activeIdx = children.findIndex((c) => c.id === activeId);
+  const activeChild = children[activeIdx];
+
+  // 1. عرض كل خانة في سطر كامل مستقل (100% عرض) حتى يظهر الاسم كاملاً بدون أي قص
   children.forEach((child, idx) => {
-    const modeIcon = child.is_full_width === 1 ? "🔘 صف كامل" : "👥 مزدوج";
-    inlineKeyboard.text(`${modeIcon}: ${child.title}`, `toggle_width_${child.id}`);
-    if (idx > 0) {
-      inlineKeyboard.text("⬆️", `move_node_up_${child.id}`);
-    }
-    if (idx < children.length - 1) {
-      inlineKeyboard.text("⬇️", `move_node_down_${child.id}`);
-    }
-    inlineKeyboard.row();
+    const isSelected = child.id === activeId;
+    const pointer = isSelected ? "🎯 " : "";
+    const modeBadge = child.is_full_width === 1 ? "[🔘 كامل]" : "[👥 مزدوج]";
+    inlineKeyboard
+      .text(`${pointer}${idx + 1}. ${child.title} ${modeBadge}`, `select_custom_node_${child.id}`)
+      .row();
   });
 
+  // 2. شريط التحكم بالخانة المحددة حالياً (رفع / تنزيل / تبديل العرض)
+  if (activeChild) {
+    if (activeIdx > 0) {
+      inlineKeyboard.text("⬆️ رفع المحدد لأعلى", `move_node_up_${activeChild.id}`);
+    }
+    if (activeIdx < children.length - 1) {
+      inlineKeyboard.text("⬇️ تنزيل المحدد لأسفل", `move_node_down_${activeChild.id}`);
+    }
+    if (activeIdx > 0 || activeIdx < children.length - 1) {
+      inlineKeyboard.row();
+    }
+
+    const nextModeText =
+      activeChild.is_full_width === 1
+        ? "🔄 تحويل المحدد إلى (👥 صف مزدوج)"
+        : "🔄 تحويل المحدد إلى (🔘 صف كامل)";
+    inlineKeyboard.text(nextModeText, `toggle_width_${activeChild.id}`).row();
+  }
+
+  // 3. أزرار التعميم السريعة
   inlineKeyboard
     .text("🔘 جعل الكل (صف كامل)", "set_all_full")
     .text("👥 جعل الكل (صف مزدوج)", "set_all_half")

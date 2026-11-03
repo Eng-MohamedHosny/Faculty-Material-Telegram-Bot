@@ -357,6 +357,24 @@ export default {
         isPrivileged(user)
       ) {
         await ensureAdminGuideNode(env);
+        const canManageGuide = await canManage(env, user, ADMIN_GUIDE_NODE_ID);
+        const guideSubfolders = await getChildNodes(env, ADMIN_GUIDE_NODE_ID);
+
+        // إذا كان المستخدم مشرف قسم (Leader) أو في وضع التصفح، ولا توجد فولدرات فرعية مضافة داخل دليل المشرفين:
+        // نعرض له المحتوى (النص + الفيديو) مباشرة في مكانه دون إدخاله داخل فولدر فارغ!
+        if (!canManageGuide && guideSubfolders.length === 0) {
+          const mats = await getNodeMaterials(env, ADMIN_GUIDE_NODE_ID);
+          if (mats.length === 0) {
+            await ctx.reply("ℹ️ لا يوجد محتوى مرفوع في شرح استخدام البوت حالياً.");
+          } else {
+            await ctx.reply("🎥 **شرح استخدام البوت للمشرفين 👇:**", { parse_mode: "Markdown" });
+            await sendBatchMaterials(ctx, mats, env);
+          }
+          return;
+        }
+
+        // أما للـ Super Admin (في وضع المشرف) أو إذا كان هناك فولدرات فرعية أضافها الأدمن بداخل الدليل:
+        // ندخل إلى الفولدر لعرض الفولدرات الفرعية أو أزرار الإدارة
         await updateUserState(env, user.telegram_id, "browsing", ADMIN_GUIDE_NODE_ID, null, null);
         user.current_node_id = ADMIN_GUIDE_NODE_ID;
         user.bot_state = "browsing";
@@ -564,18 +582,7 @@ export default {
           .bind(draftKey, JSON.stringify(items))
           .run();
 
-        const broadcastKb = new Keyboard()
-          .text("✅ إنهاء وإرسال الإشعار")
-          .row()
-          .text("❌ إلغاء")
-          .resized();
-
-        await ctx.reply(
-          `📥 **تم استلام الرسالة/الملف رقم (${items.length}) ضمن الإشعار.**\n\n` +
-          `• يمكنك إرسال المزيد من النصوص أو الملفات الآن لتصل معاً بنفس الترتيب.\n` +
-          `• عند الانتهاء اضغط **[✅ إنهاء وإرسال الإشعار]** أو اضغط **[❌ إلغاء]** للتراجع.`,
-          { parse_mode: "Markdown", reply_markup: broadcastKb }
-        );
+        // لا نرسل أي رسالة فاصلة هنا حتى لا نفصل بين رسائل المشرف؛ ينتظر البوت بصمت حتى يضغط "✅ إنهاء وإرسال الإشعار"
         return;
       }
 
@@ -1494,6 +1501,9 @@ export default {
           if (!userCanManageChild && !hasSubfolders) {
             const mats = await getNodeMaterials(env, childNode.id);
             if (mats.length > 0) {
+              await ctx.reply(`📂 **[ ${childNode.title} ]** — الملفات والمحتويات المتاحة 👇:`, {
+                parse_mode: "Markdown",
+              });
               await sendBatchMaterials(ctx, mats, env);
             } else {
               await ctx.reply(`لا يوجد محتوى في ${childNode.title} بعد.`);
@@ -2249,6 +2259,18 @@ export default {
         return;
       }
 
+      // Select node in customization panel
+      if (data.startsWith("select_custom_node_")) {
+        const selectedId = parseInt(data.replace("select_custom_node_", ""), 10);
+        const children = await getChildNodes(env, user.current_node_id);
+        const newKb = buildWidthCustomizationKeyboard(children, user.current_node_id !== null, selectedId);
+        await ctx.answerCallbackQuery().catch(() => {});
+        try {
+          await ctx.editMessageReplyMarkup({ reply_markup: newKb });
+        } catch (_) {}
+        return;
+      }
+
       // Toggle width
       if (data.startsWith("toggle_width_")) {
         const nodeId = parseInt(data.replace("toggle_width_", ""), 10);
@@ -2268,10 +2290,8 @@ export default {
           });
 
           const children = await getChildNodes(env, user.current_node_id);
-          const updatedInlineKeyboard = buildWidthCustomizationKeyboard(children, user.current_node_id !== null);
+          const updatedInlineKeyboard = buildWidthCustomizationKeyboard(children, user.current_node_id !== null, nodeId);
           await ctx.editMessageReplyMarkup({ reply_markup: updatedInlineKeyboard });
-
-          await renderFolderView(ctx, user, user.current_node_id, env);
           return;
         }
       }
@@ -2310,7 +2330,7 @@ export default {
         await env.DB.batch(statements);
 
         const updatedSiblings = await getChildNodes(env, targetNode.parent_id);
-        const newKb = buildWidthCustomizationKeyboard(updatedSiblings, targetNode.parent_id !== null);
+        const newKb = buildWidthCustomizationKeyboard(updatedSiblings, targetNode.parent_id !== null, nodeId);
 
         await ctx.answerCallbackQuery({ text: isUp ? "⬆️ تم رفع الخانة لأعلى" : "⬇️ تم تنزيل الخانة لأسفل" });
         await ctx.editMessageReplyMarkup({ reply_markup: newKb });
