@@ -364,6 +364,11 @@ export default {
           !!text &&
           (text.includes("إلغاء") ||
             text.includes("رجوع") ||
+            text === "✅ إنهاء الحفظ" ||
+            text === "إنهاء الحفظ" ||
+            text === "انهاء الحفظ" ||
+            text === "إنهاء الرفع" ||
+            text === "انهاء الرفع" ||
             (text.startsWith("/") && !text.startsWith("/promote") && !text.startsWith("/demote")));
       }
 
@@ -385,6 +390,19 @@ export default {
           await renderFolderView(ctx, user, user.current_node_id, env);
           return;
         }
+      }
+
+      // If user is in browsing mode and presses "إنهاء الحفظ" or similar from a previous keyboard
+      if (
+        (text === "✅ إنهاء الحفظ" ||
+          text === "إنهاء الحفظ" ||
+          text === "انهاء الحفظ" ||
+          text === "إنهاء الرفع" ||
+          text === "انهاء الرفع") &&
+        user.bot_state !== "uploading"
+      ) {
+        await renderFolderView(ctx, user, user.current_node_id, env);
+        return;
       }
 
       if (text === "🔄 تغيير القسم") {
@@ -1363,16 +1381,6 @@ export default {
         return;
       }
 
-      // Admin Action: Send Content in Node
-      if ((text === "📥 عرض المحتوى والملفات" || text === "📥 إرسال الملفات") && user.current_node_id) {
-        const materials = await getNodeMaterials(env, user.current_node_id);
-        if (materials.length > 0) {
-          await sendBatchMaterials(ctx, materials, env);
-        } else {
-          await ctx.reply("لا يوجد محتوى في هذا المجلد بعد.");
-        }
-        return;
-      }
 
       // Admin Action: Delete node or material
       if (text === "🗑️ حذف خانة أو ملف" && (await canManage(env, user, user.current_node_id)) && user.current_node_id) {

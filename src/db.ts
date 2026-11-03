@@ -180,8 +180,22 @@ export async function handleFolderCreateOrRename(
 ): Promise<{ ok: boolean; cleanTitle?: string; errorMsg?: string }> {
   const cleanTitle = rawInput.trim();
 
+  // 1. منع استخدام أسماء الأزرار أو الأوامر المحجوزة
   if (isReservedButton(cleanTitle)) {
     return { ok: false, errorMsg: "⚠️ لا يمكن استخدام هذا الاسم لأنه يطابق زراً أو أمراً محجوزاً في النظام." };
+  }
+
+  // 2. منع استخدام الروابط أو الرسائل الطويلة أو متعددة الأسطر كاسم مجلد/قسم
+  if (
+    cleanTitle.includes("http://") ||
+    cleanTitle.includes("https://") ||
+    cleanTitle.includes("\n") ||
+    cleanTitle.length > 55
+  ) {
+    return {
+      ok: false,
+      errorMsg: "⚠️ اسم المجلد غير صالح (لا يمكن أن يحتوي على روابط أو عدة أسطر أو يتجاوز 55 حرفاً). إذا كنت تريد رفع محتوى نصي أو رابط، اضغط [❌ إلغاء] ثم اختر [📤 رفع المحتوى هنا]."
+    };
   }
 
   let parentId: number | null = null;
@@ -240,6 +254,10 @@ export async function getAllDescendantMaterialsGrouped(
   env: Env,
   nodeId: number
 ): Promise<FolderWithMaterials[]> {
+  const currentNode = await env.DB.prepare("SELECT id, title FROM nodes WHERE id = ?")
+    .bind(nodeId)
+    .first<{ id: number; title: string }>();
+
   const { results: descNodes } = await env.DB.prepare(
     `WITH RECURSIVE tree(id, title, depth, sort_order) AS (
       SELECT id, title, 1, sort_order FROM nodes WHERE parent_id = ?
@@ -250,20 +268,27 @@ export async function getAllDescendantMaterialsGrouped(
     SELECT id, title FROM tree ORDER BY depth ASC, sort_order ASC, id ASC`
   ).bind(nodeId).all<{ id: number; title: string }>();
 
-  if (!descNodes || descNodes.length === 0) return [];
+  const allNodes: { id: number; title: string }[] = [];
+  if (currentNode) {
+    allNodes.push({ id: currentNode.id, title: currentNode.title });
+  }
+  if (descNodes && descNodes.length > 0) {
+    allNodes.push(...descNodes);
+  }
+  if (allNodes.length === 0) return [];
 
-  const childIds = descNodes.map((c) => c.id);
-  const placeholders = childIds.map(() => "?").join(",");
+  const nodeIds = allNodes.map((n) => n.id);
+  const placeholders = nodeIds.map(() => "?").join(",");
   const { results: allMaterials } = await env.DB.prepare(
     `SELECT * FROM materials WHERE node_id IN (${placeholders}) ORDER BY id ASC`
-  ).bind(...childIds).all<MaterialRow>();
+  ).bind(...nodeIds).all<MaterialRow>();
 
   const result: FolderWithMaterials[] = [];
-  for (const node of descNodes) {
-    const mats = (allMaterials || []).filter((m) => m.node_id === node.id);
+  for (const n of allNodes) {
+    const mats = (allMaterials || []).filter((m) => m.node_id === n.id);
     if (mats.length > 0) {
       result.push({
-        folderPath: node.title,
+        folderPath: n.title,
         materials: mats,
       });
     }

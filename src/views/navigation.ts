@@ -162,14 +162,16 @@ export async function renderFolderView(ctx: any, user: UserRow, nodeId: number |
     keyboard.row();
   }
 
-  if (nodeId !== null && children.length > 0) {
+  // 1. زر "📦 عرض وتحميل كل المحتوى" يظهر فقط داخل المادة الدراسية أو أقسامها الفرعية (courseNode !== null)
+  // ولا يظهر أبداً في مستوى الأقسام أو مستوى الترم الأول والترم الثاني
+  if (nodeId !== null && courseNode !== null && children.length > 0) {
     const hasDescendantMaterials = await env.DB.prepare(
       `WITH RECURSIVE subnodes(id) AS (
-        SELECT id FROM nodes WHERE parent_id = ?
-        UNION ALL
-        SELECT n.id FROM nodes n JOIN subnodes s ON n.parent_id = s.id
-      )
-      SELECT 1 FROM materials WHERE node_id IN (SELECT id FROM subnodes) LIMIT 1`
+         SELECT id FROM nodes WHERE id = ?
+         UNION ALL
+         SELECT n.id FROM nodes n JOIN subnodes s ON n.parent_id = s.id
+       )
+       SELECT 1 FROM materials WHERE node_id IN (SELECT id FROM subnodes) LIMIT 1`
     )
       .bind(nodeId)
       .first();
@@ -179,13 +181,10 @@ export async function renderFolderView(ctx: any, user: UserRow, nodeId: number |
     }
   }
 
-  // Only show "📥 عرض المحتوى والملفات" if this folder actually has direct materials AND children
-  if (materials.length > 0 && children.length > 0) {
-    keyboard.text("📥 عرض المحتوى والملفات").row();
-  }
+  // تم حذف زر "📥 عرض المحتوى والملفات" نهائياً لمنع ازدواجية الأزرار
 
-  // Student Contribution button: ONLY on the Course level (where sections like المحاضرات, السكاشن, الملخصات are listed)
-  if (!isManager && courseNode !== null && nodeId === courseNode.id) {
+  // 2. زر مساهمة الطلاب (يظهر للطلاب فقط داخل المادة)
+  if (!isManager && courseNode !== null) {
     keyboard.text("📝 ساهم بملخص أو امتحان").row();
   }
 
