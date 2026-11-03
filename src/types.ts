@@ -71,6 +71,7 @@ export interface BroadcastJobRow {
   sender_id: number;
   from_chat_id: number;
   message_id: number;
+  message_ids?: string | null;
   last_user_id: number;
   sent_count: number;
   failed_count: number;

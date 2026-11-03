@@ -527,21 +527,41 @@ export default {
             targetTitle = deptNode?.title || "القسم";
           }
 
-          // إدراج جميع رسائل الإشعار بالترتيب في جدول broadcast_jobs
-          const jobStatements = items.map((item) =>
-            env.DB.prepare(
-              `INSERT INTO broadcast_jobs (target_type, dept_node_id, dept_title, sender_id, from_chat_id, message_id, status)
-               VALUES (?, ?, ?, ?, ?, ?, 'pending')`
+          const fromChatId = items[0].chatId;
+          const firstMessageId = items[0].messageId;
+          const allMessageIdsJson = JSON.stringify(items.map((i) => i.messageId));
+
+          // إدراج مهمة واحدة فقط تجمع كل رسائل الجلسة
+          try {
+            await env.DB.prepare(
+              `INSERT INTO broadcast_jobs (target_type, dept_node_id, dept_title, sender_id, from_chat_id, message_id, message_ids, status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')`
             ).bind(
               isSuperBroadcast ? "all_admins" : "department",
               isSuperBroadcast ? null : deptId,
               targetTitle,
               user.telegram_id,
-              item.chatId,
-              item.messageId
-            )
-          );
-          await env.DB.batch(jobStatements);
+              fromChatId,
+              firstMessageId,
+              allMessageIdsJson
+            ).run();
+          } catch (_) {
+            try {
+              await env.DB.prepare("ALTER TABLE broadcast_jobs ADD COLUMN message_ids TEXT").run();
+            } catch (_) {}
+            await env.DB.prepare(
+              `INSERT INTO broadcast_jobs (target_type, dept_node_id, dept_title, sender_id, from_chat_id, message_id, message_ids, status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')`
+            ).bind(
+              isSuperBroadcast ? "all_admins" : "department",
+              isSuperBroadcast ? null : deptId,
+              targetTitle,
+              user.telegram_id,
+              fromChatId,
+              firstMessageId,
+              allMessageIdsJson
+            ).run();
+          }
 
           // حذف المسودة وإرجاع المستخدم لوضع التصفح
           await env.DB.prepare("DELETE FROM settings WHERE key = ?").bind(draftKey).run();
@@ -552,8 +572,7 @@ export default {
           executionCtx.waitUntil(processBroadcastQueue(env));
 
           await ctx.reply(
-            `✅ **تم اعتماد الإشعار المكون من (${items.length}) رسالة/ملف!**\n\n` +
-            `🚀 جاري إرساله الآن بالترتيب إلى **${targetTitle}** في الخلفية، وسيصلك تقرير فور اكتمال الإرسال.`,
+            `✅ **تم اعتماد الإشعار (${items.length} رسالة/ملف) وجاري إرساله فوراً دفعة واحدة إلى ${targetTitle}!**`,
             { parse_mode: "Markdown" }
           );
           await renderFolderView(ctx, user, user.current_node_id, env);
