@@ -70,8 +70,13 @@ export default {
 
     const bot = new Bot(env.BOT_TOKEN);
 
-    bot.catch((err) => {
-      console.error("Unhandled bot error:", err);
+    bot.catch(async (err) => {
+      console.error("Unhandled Grammy Error:", err.error || err);
+      try {
+        await err.ctx?.reply(
+          "⚠️ حدث خطأ غير متوقع أثناء معالجة طلبك. تم إيقاف العملية الحالية لحماية البوت، يرجى المحاولة مرة أخرى أو الضغط على /start."
+        );
+      } catch (_) {}
     });
 
     bot.on("channel_post", async (ctx) => {
@@ -252,42 +257,44 @@ export default {
 
     // Helper function to rollback uncommitted uploads in the current session:
     async function rollbackUploadSession(ctx: any, env: Env, user: UserRow): Promise<number> {
-      if (user.bot_state !== "uploading" || !user.current_node_id || user.pending_target_id === null) {
+      if (!user.current_node_id || user.pending_target_id === null) {
         return 0;
       }
 
       const savepointId = user.pending_target_id;
       const { results: sessionMats } = await env.DB.prepare(
         `SELECT id, backup_message_id FROM materials 
-         WHERE node_id = ? AND uploaded_by = ? AND id > ?`
+         WHERE node_id = ? AND id > ?`
       )
-        .bind(user.current_node_id, user.telegram_id, savepointId)
+        .bind(user.current_node_id, savepointId)
         .all<{ id: number; backup_message_id: number | null }>();
 
       if (!sessionMats || sessionMats.length === 0) {
         return 0;
       }
 
-      // 1. Delete from D1 Database immediately
-      await env.DB.prepare(
-        `DELETE FROM materials WHERE node_id = ? AND uploaded_by = ? AND id > ?`
-      )
-        .bind(user.current_node_id, user.telegram_id, savepointId)
-        .run();
-
-      // 2. Delete from Backup Channel in background
+      // 1. Delete from Backup Channel (Resources channel)
       const backupChannelId = await getBackupChannelId(env);
       if (backupChannelId) {
         for (const sm of sessionMats) {
           if (sm.backup_message_id) {
             try {
               await ctx.api.deleteMessage(backupChannelId, sm.backup_message_id);
-            } catch (err) {}
+            } catch (err) {
+              console.error(`Failed to delete backup message ${sm.backup_message_id}:`, err);
+            }
           }
         }
       }
 
-      return sessionMats.length;
+      // 2. Delete from D1 Database
+      const delResult = await env.DB.prepare(
+        `DELETE FROM materials WHERE node_id = ? AND id > ?`
+      )
+        .bind(user.current_node_id, savepointId)
+        .run();
+
+      return delResult.meta?.changes ?? sessionMats.length;
     }
 
     // ================= MESSAGE HANDLER =================
@@ -970,34 +977,63 @@ export default {
         }
 
         if (fileId && user.current_node_id) {
-          let backupMsgId: number | null = null;
-          const backupChannelId = await getBackupChannelId(env);
-          if (backupChannelId) {
-            try {
-              let res: any;
-              if (fileType === "text") {
-                res = await ctx.api.copyMessage(backupChannelId, ctx.chat.id, ctx.message.message_id);
-              } else {
-                res = await ctx.api.copyMessage(backupChannelId, ctx.chat.id, ctx.message.message_id, {
-                  caption: caption ? `${caption}\n\n📄 الملف: ${fileName}` : `📄 الملف: ${fileName}`,
-                });
-              }
-              if (res?.message_id) backupMsgId = res.message_id;
-            } catch (e) {
-              try {
-                const res = await ctx.forwardMessage(backupChannelId);
-                if (res?.message_id) backupMsgId = res.message_id;
-              } catch (err) {}
-            }
+          if (user.current_node_id === ADMIN_GUIDE_NODE_ID) {
+            await ensureAdminGuideNode(env);
           }
 
-          await env.DB.prepare(
-            "INSERT INTO materials (node_id, file_name, telegram_file_id, file_type, caption, uploaded_by, backup_message_id) VALUES (?, ?, ?, ?, ?, ?, ?)"
-          )
-            .bind(user.current_node_id, fileName, fileId, fileType, caption, user.telegram_id, backupMsgId)
-            .run();
+          const folderExists = await env.DB.prepare("SELECT id FROM nodes WHERE id = ?")
+            .bind(user.current_node_id)
+            .first();
 
-          return;
+          if (!folderExists) {
+            await updateUserState(env, user.telegram_id, "browsing", null, null, null);
+            user.bot_state = "browsing";
+            user.current_node_id = null;
+            user.pending_target_id = null;
+            await ctx.reply("❌ تعذر حفظ المحتوى لأن المجلد لم يعد موجوداً. تم إعادتك للقائمة الرئيسية.");
+            await renderFolderView(ctx, user, null, env);
+            return;
+          }
+
+          try {
+            // 1. Insert into materials FIRST (with backup_message_id = null)
+            const insertRes = await env.DB.prepare(
+              "INSERT INTO materials (node_id, file_name, telegram_file_id, file_type, caption, uploaded_by, backup_message_id) VALUES (?, ?, ?, ?, ?, ?, NULL)"
+            )
+              .bind(user.current_node_id, fileName, fileId, fileType, caption, user.telegram_id)
+              .run();
+
+            const insertedMaterialId = insertRes.meta?.last_row_id;
+
+            // 2. Copy to backup channel AFTER successful D1 insertion
+            const backupChannelId = await getBackupChannelId(env);
+            if (backupChannelId && insertedMaterialId) {
+              try {
+                let res: any;
+                if (fileType === "text") {
+                  res = await ctx.api.copyMessage(backupChannelId, ctx.chat.id, ctx.message.message_id);
+                } else {
+                  res = await ctx.api.copyMessage(backupChannelId, ctx.chat.id, ctx.message.message_id, {
+                    caption: caption ? `${caption}\n\n📄 الملف: ${fileName}` : `📄 الملف: ${fileName}`,
+                  });
+                }
+                if (res?.message_id) {
+                  await env.DB.prepare("UPDATE materials SET backup_message_id = ? WHERE id = ?")
+                    .bind(res.message_id, insertedMaterialId)
+                    .run();
+                }
+              } catch (copyErr) {
+                console.error("Failed to copy material to backup channel:", copyErr);
+              }
+            }
+            return;
+          } catch (dbErr: any) {
+            console.error("D1 Insert Error during uploading:", dbErr);
+            await ctx.reply(
+              `❌ تعذر حفظ المحتوى في قاعدة البيانات: ${dbErr?.message || "خطأ غير معروف"}. يرجى الضغط على [❌ إلغاء] والمحاولة مجدداً.`
+            );
+            return;
+          }
         }
       }
 
@@ -1235,9 +1271,25 @@ export default {
         if (!user.current_node_id) {
           return ctx.reply("❌ لا يمكن رفع محتوى في الصفحة الرئيسية، يرجى الدخول لمادة أو خانة أولاً.");
         }
-        const currentFolder = await env.DB.prepare("SELECT title FROM nodes WHERE id = ?")
+
+        if (user.current_node_id === ADMIN_GUIDE_NODE_ID) {
+          await ensureAdminGuideNode(env);
+        }
+
+        const currentFolder = await env.DB.prepare("SELECT id, title FROM nodes WHERE id = ?")
           .bind(user.current_node_id)
-          .first<{ title: string }>();
+          .first<{ id: number; title: string }>();
+
+        if (!currentFolder) {
+          await updateUserState(env, user.telegram_id, "browsing", null, null, null);
+          user.bot_state = "browsing";
+          user.current_node_id = null;
+          user.managed_node_id = null;
+          user.pending_target_id = null;
+          await ctx.reply("⚠️ المجلد الذي كنت تحاول الرفع بداخله لم يعد موجوداً. تم إعادتك للقائمة الرئيسية، يرجى اختيار المجلد مجدداً.");
+          await renderFolderView(ctx, user, null, env);
+          return;
+        }
 
         // Record the current maximum material ID as the transaction savepoint!
         const maxMatRow = await env.DB.prepare("SELECT COALESCE(MAX(id), 0) as max_id FROM materials")
@@ -1250,7 +1302,7 @@ export default {
 
         const uploadKeyboard = new Keyboard().text("✅ إنهاء الحفظ").row().text("❌ إلغاء").resized();
         await ctx.reply(
-          `📤 **وضع رفع المحتوى نشط الآن في مجلد: [${currentFolder?.title || "الحالي"}]**\n\n` +
+          `📤 **وضع رفع المحتوى نشط الآن في مجلد: [${currentFolder.title}]**\n\n` +
             `قم بإرسال أو تحويل (Forward) أي محتوى هنا دفعة واحدة:\n` +
             `• 📄 ملفات PDF أو مستندات\n` +
             `• 🖼️ صور أو 🎥 فيديوهات أو 🎧 صوتيات\n` +
@@ -2361,6 +2413,11 @@ export default {
       }
     });
 
-    return webhookCallback(bot, "cloudflare-mod")(request);
+    try {
+      return await webhookCallback(bot, "cloudflare-mod")(request);
+    } catch (webhookErr) {
+      console.error("Critical Webhook Error:", webhookErr);
+      return new Response("OK", { status: 200 });
+    }
   },
 };
