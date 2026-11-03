@@ -1,4 +1,4 @@
-import { Env, UserRow, NodeRow, MaterialRow, FolderWithMaterials, isReservedButton } from "./types";
+import { Env, UserRow, NodeRow, MaterialRow, FolderWithMaterials, isReservedButton, ADMIN_GUIDE_NODE_ID } from "./types";
 
 let cachedBackupChannelId: string | null = null;
 
@@ -25,8 +25,8 @@ export async function getBackupChannelId(env: Env): Promise<string | null> {
 
 export async function ensureAdminGuideNode(env: Env): Promise<void> {
   await env.DB.prepare(
-    "INSERT OR IGNORE INTO nodes (id, parent_id, title, sort_order, is_full_width) VALUES (-100, NULL, '🎥 شرح استخدام البوت (للمشرفين)', 0, 1)"
-  ).run();
+    "INSERT OR IGNORE INTO nodes (id, parent_id, title, sort_order, created_by, is_full_width) VALUES (?, ?, '🎥 شرح استخدام البوت (للمشرفين)', 0, NULL, 1)"
+  ).bind(ADMIN_GUIDE_NODE_ID, ADMIN_GUIDE_NODE_ID).run();
 }
 
 export async function getUser(env: Env, telegramId: number, fullName?: string): Promise<UserRow> {
@@ -107,13 +107,15 @@ export async function updateUserState(
 export async function canManage(env: Env, user: UserRow, nodeId: number | null): Promise<boolean> {
   if (user.view_mode === "student") return false;
   if (user.role === "super_admin") return true;
+  if (nodeId === null) return false;
+  if (nodeId === ADMIN_GUIDE_NODE_ID) return false;
   if (user.role === "leader") {
-    if (nodeId === null) return false;
     const match = await env.DB.prepare(
-      `WITH RECURSIVE ancestors(id, parent_id) AS (
-        SELECT id, parent_id FROM nodes WHERE id = ?
+      `WITH RECURSIVE ancestors(id, parent_id, depth) AS (
+        SELECT id, parent_id, 0 FROM nodes WHERE id = ?
         UNION ALL
-        SELECT n.id, n.parent_id FROM nodes n JOIN ancestors a ON n.id = a.parent_id
+        SELECT n.id, n.parent_id, a.depth + 1 FROM nodes n JOIN ancestors a ON n.id = a.parent_id
+        WHERE a.parent_id IS NOT NULL AND a.parent_id != a.id AND a.depth < 15
       )
       SELECT 1 FROM ancestors a JOIN user_permissions p ON a.id = p.node_id WHERE p.telegram_id = ? LIMIT 1`
     )
@@ -155,12 +157,22 @@ export async function getNodeHierarchy(
       UNION ALL
       SELECT n.id, n.parent_id, n.title, n.sort_order, n.created_by, n.is_full_width, np.depth + 1
       FROM nodes n JOIN node_path np ON n.id = np.parent_id
+      WHERE np.parent_id IS NOT NULL AND np.parent_id != np.id AND np.depth < 15
     )
     SELECT * FROM node_path ORDER BY depth DESC`
   ).bind(nodeId).all<NodeRow & { depth: number }>();
 
   if (!ancestors || ancestors.length === 0) {
     return { rootDept: null, semesterNode: null, courseNode: null, depth: 0, breadcrumb: "" };
+  }
+  if (ancestors[0].id === ADMIN_GUIDE_NODE_ID) {
+    return {
+      rootDept: null,
+      semesterNode: null,
+      courseNode: ancestors[0],
+      depth: ancestors.length,
+      breadcrumb: ancestors.map((a) => a.title).join(" ⬅️ "),
+    };
   }
   const rootDept = ancestors[0] || null;
   const semesterNode = ancestors.length >= 2 ? ancestors[1] : null;
@@ -230,9 +242,9 @@ export async function getChildNodes(env: Env, parentId: number | null): Promise<
     return results || [];
   } else {
     const { results } = await env.DB.prepare(
-      "SELECT * FROM nodes WHERE parent_id = ? AND id > 0 ORDER BY sort_order ASC, id ASC"
+      "SELECT * FROM nodes WHERE parent_id = ? AND id != ? ORDER BY sort_order ASC, id ASC"
     )
-      .bind(parentId)
+      .bind(parentId, parentId)
       .all<NodeRow>();
     return results || [];
   }

@@ -1,5 +1,5 @@
 import { Keyboard, InlineKeyboard } from "grammy";
-import { Env, UserRow, NodeRow, MaterialRow } from "../types";
+import { Env, UserRow, NodeRow, MaterialRow, ADMIN_GUIDE_NODE_ID } from "../types";
 import {
   canManage,
   isPrivileged,
@@ -188,23 +188,31 @@ export async function renderFolderView(ctx: any, user: UserRow, nodeId: number |
     keyboard.text("📝 ساهم بملخص أو امتحان").row();
   }
 
+  const isAdminGuide = nodeId === ADMIN_GUIDE_NODE_ID || hierarchy.courseNode?.id === ADMIN_GUIDE_NODE_ID;
+
   if (isManager && nodeId !== null) {
     keyboard
       .text("📤 رفع المحتوى هنا")
       .text("➕ إضافة خانة/مادة")
       .row()
       .text("✏️ تعديل الاسم")
-      .text("📐 تخصيص العرض والصفوف")
+      .text("📐 تخصيص العرض والترتيب")
       .row()
-      .text("🗑️ حذف خانة أو ملف")
-      .text("📢 إرسال إشعار للقسم")
-      .row()
-      .text("📅 إضافة تاسك للأسبوع")
-      .row();
+      .text("🗑️ حذف خانة أو ملف");
+
+    if (!isAdminGuide) {
+      keyboard
+        .text("📢 إرسال إشعار للقسم")
+        .row()
+        .text("📅 إضافة تاسك للأسبوع")
+        .row();
+    } else {
+      keyboard.row();
+    }
   } else if (isManager && nodeId === null) {
     keyboard
       .text("➕ إضافة قسم جديد")
-      .text("📐 تخصيص العرض والصفوف")
+      .text("📐 تخصيص العرض والترتيب")
       .row()
       .text("🎥 شرح استخدام البوت (للمشرفين)")
       .row();
@@ -219,35 +227,55 @@ export async function renderFolderView(ctx: any, user: UserRow, nodeId: number |
     keyboard.text("ℹ️ عن البوت").row();
   }
 
+  if (materials.length > 0) {
+    await sendBatchMaterials(ctx, materials, env);
+  }
+
   if (children.length > 0) {
     await ctx.reply("اختر من القوائم بالأسفل 👇", {
       reply_markup: keyboard,
     });
   } else if (materials.length === 0) {
-    await ctx.reply("هذا القسم فارغ حالياً.", {
+    const emptyMsg = isAdminGuide
+      ? `🎥 **شرح استخدام البوت للمشرفين والليدرات:**\n\nلم يتم رفع محتوى بعد.` +
+        (isManager ? "\n\nاضغط [📤 رفع المحتوى هنا] لرفع فيديو أو شرح نصي." : "")
+      : "هذا القسم فارغ حالياً.";
+    await ctx.reply(emptyMsg, {
       reply_markup: keyboard,
     });
   } else {
-    await ctx.reply("الملفات المتاحة 👇", {
+    await ctx.reply("الملفات والمحتويات المتاحة أعلاه 👆", {
       reply_markup: keyboard,
     });
-    await sendBatchMaterials(ctx, materials, env);
   }
 }
 
 export function buildWidthCustomizationKeyboard(children: NodeRow[], hasParent: boolean): InlineKeyboard {
   const inlineKeyboard = new InlineKeyboard();
-  for (const child of children) {
-    const statusIcon = child.is_full_width === 1 ? "🔘 صف كامل" : "👥 صف مزدوج";
-    inlineKeyboard.text(`${statusIcon}: ${child.title}`, `toggle_width_${child.id}`).row();
-  }
+
+  children.forEach((child, idx) => {
+    const modeIcon = child.is_full_width === 1 ? "🔘 صف كامل" : "👥 مزدوج";
+    inlineKeyboard.text(`${modeIcon}: ${child.title}`, `toggle_width_${child.id}`);
+    if (idx > 0) {
+      inlineKeyboard.text("⬆️", `move_node_up_${child.id}`);
+    }
+    if (idx < children.length - 1) {
+      inlineKeyboard.text("⬇️", `move_node_down_${child.id}`);
+    }
+    inlineKeyboard.row();
+  });
+
+  inlineKeyboard
+    .text("🔘 جعل الكل (صف كامل)", "set_all_full")
+    .text("👥 جعل الكل (صف مزدوج)", "set_all_half")
+    .row();
 
   if (hasParent) {
     inlineKeyboard.text("⚡ تطبيق هذا التنسيق على باقي مواد هذا القسم", "apply_layout_dept").row();
     inlineKeyboard.text("🌍 تطبيق هذا التنسيق على كل مواد الكلية", "apply_layout_all").row();
   }
 
-  inlineKeyboard.text("❌ إغلاق", "close_customization");
+  inlineKeyboard.text("✅ حفظ وإغلاق", "close_customization");
   return inlineKeyboard;
 }
 
