@@ -51,6 +51,8 @@ import {
 
 export { Env } from "./types";
 
+let cachedBotInfo: any = undefined;
+
 export default {
   async scheduled(event: ScheduledEvent, env: Env, executionCtx: ExecutionContext): Promise<void> {
     executionCtx.waitUntil(processBroadcastQueue(env));
@@ -68,7 +70,10 @@ export default {
       }
     }
 
-    const bot = new Bot(env.BOT_TOKEN);
+    const bot = new Bot(
+      env.BOT_TOKEN,
+      cachedBotInfo ? { botInfo: cachedBotInfo } : undefined
+    );
 
     bot.catch(async (err) => {
       console.error("Unhandled Grammy Error:", err.error || err);
@@ -2601,6 +2606,10 @@ export default {
     });
 
     try {
+      if (!cachedBotInfo) {
+        await bot.init();
+        cachedBotInfo = bot.botInfo;
+      }
       return await webhookCallback(bot, "cloudflare-mod")(request);
     } catch (webhookErr) {
       console.error("Critical Webhook Error:", webhookErr);

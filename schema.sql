@@ -95,10 +95,11 @@ CREATE TABLE IF NOT EXISTS settings (
   value TEXT
 );
 
--- 9. Performance Indexes
-CREATE INDEX IF NOT EXISTS idx_nodes_parent_order ON nodes(parent_id, sort_order);
-CREATE INDEX IF NOT EXISTS idx_materials_node ON materials(node_id);
-CREATE INDEX IF NOT EXISTS idx_users_sub ON users(subscribed_dept_id, notifications_enabled, telegram_id);
-CREATE INDEX IF NOT EXISTS idx_broadcast_status ON broadcast_jobs(status, id);
-CREATE INDEX IF NOT EXISTS idx_submissions_course ON submissions(course_node_id, status);
-CREATE INDEX IF NOT EXISTS idx_tasks_dept_due ON weekly_tasks(dept_node_id, due_date);
+-- 9. Performance Indexes (Composite Indexes for High Performance)
+CREATE INDEX IF NOT EXISTS idx_nodes_parent_sort ON nodes(parent_id, sort_order, id);
+CREATE INDEX IF NOT EXISTS idx_materials_node_id ON materials(node_id, id);
+CREATE INDEX IF NOT EXISTS idx_users_dept_notif ON users(subscribed_dept_id, notifications_enabled, telegram_id);
+CREATE INDEX IF NOT EXISTS idx_users_role_id ON users(role, telegram_id);
+CREATE INDEX IF NOT EXISTS idx_weekly_tasks_dept_due ON weekly_tasks(dept_node_id, due_date);
+CREATE INDEX IF NOT EXISTS idx_submissions_course_status ON submissions(course_node_id, status);
+CREATE INDEX IF NOT EXISTS idx_broadcast_jobs_status ON broadcast_jobs(status, id);

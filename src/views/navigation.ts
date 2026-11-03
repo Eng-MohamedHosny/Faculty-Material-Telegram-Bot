@@ -80,7 +80,15 @@ export async function renderNotificationToggleCard(ctx: any, user: UserRow, env:
 }
 
 export async function renderFolderView(ctx: any, user: UserRow, nodeId: number | null, env: Env): Promise<void> {
-  const isManager = await canManage(env, user, nodeId);
+  const [children, materials, isManager, hierarchy] = await Promise.all([
+    getChildNodes(env, nodeId),
+    nodeId !== null ? getNodeMaterials(env, nodeId) : Promise.resolve([]),
+    canManage(env, user, nodeId),
+    nodeId !== null
+      ? getNodeHierarchy(env, nodeId)
+      : Promise.resolve({ rootDept: null, semesterNode: null, courseNode: null, depth: 0, breadcrumb: "" }),
+  ]);
+  const { rootDept, courseNode } = hierarchy;
   const privileged = isPrivileged(user);
 
   // FOCUSED STUDENT ROOT VIEW:
@@ -121,16 +129,6 @@ export async function renderFolderView(ctx: any, user: UserRow, nodeId: number |
     );
     return;
   }
-
-  const [children, materials, hierarchy] = await Promise.all([
-    getChildNodes(env, nodeId),
-    nodeId ? getNodeMaterials(env, nodeId) : Promise.resolve([]),
-    nodeId
-      ? getNodeHierarchy(env, nodeId)
-      : Promise.resolve({ rootDept: null, semesterNode: null, courseNode: null, depth: 0, breadcrumb: "" }),
-  ]);
-
-  const { courseNode } = hierarchy;
 
   const keyboard = new Keyboard();
   keyboard.resized();
