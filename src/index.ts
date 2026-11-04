@@ -2277,21 +2277,44 @@ export default {
         const matId = parseInt(parts[1], 10);
         const createdFolderId = parseInt(parts[2], 10);
 
+        const backupChannelId = await getBackupChannelId(env);
+        const msgIdsToDelete = new Set<number>();
+
         if (matId > 0) {
-          const deleted = await env.DB.prepare("DELETE FROM materials WHERE id = ? RETURNING backup_message_id").bind(matId).first<{ backup_message_id: number | null }>();
-          const backupChannelId = await getBackupChannelId(env);
-          if (backupChannelId && deleted?.backup_message_id) {
-            await bot.api.deleteMessage(backupChannelId, deleted.backup_message_id).catch(() => {});
+          const deleted = await env.DB.prepare("DELETE FROM materials WHERE id = ? RETURNING backup_message_id")
+            .bind(matId)
+            .first<{ backup_message_id: number | null }>();
+          if (deleted?.backup_message_id) {
+            msgIdsToDelete.add(deleted.backup_message_id);
           }
         }
         if (createdFolderId > 0) {
+          const { results: folderMats } = await env.DB.prepare(
+            `WITH RECURSIVE subnodes(id) AS (
+              SELECT id FROM nodes WHERE id = ?
+              UNION ALL
+              SELECT n.id FROM nodes n JOIN subnodes s ON n.parent_id = s.id
+            )
+            SELECT backup_message_id FROM materials WHERE node_id IN (SELECT id FROM subnodes) AND backup_message_id IS NOT NULL`
+          )
+            .bind(createdFolderId)
+            .all<{ backup_message_id: number }>();
+          for (const fm of folderMats || []) {
+            if (fm.backup_message_id) msgIdsToDelete.add(fm.backup_message_id);
+          }
           await env.DB.prepare("DELETE FROM nodes WHERE id = ?").bind(createdFolderId).run();
+        }
+
+        if (backupChannelId && msgIdsToDelete.size > 0) {
+          await Promise.allSettled(
+            Array.from(msgIdsToDelete).map((msgId) => bot.api.deleteMessage(backupChannelId, msgId))
+          );
         }
 
         await env.DB.prepare("UPDATE submissions SET status = 'pending' WHERE id = ?").bind(subId).run();
         const sub = await env.DB.prepare("SELECT * FROM submissions WHERE id = ?").bind(subId).first<SubmissionRow>();
 
-        await ctx.answerCallbackQuery({ text: "↩️ تم سحب الملف وإلغاء الخطوة! اختر المسار الجديد الآن." });
+        await ctx.answerCallbackQuery({ text: "↩️ تم سحب الملف وحذفه من القناة! اختر المسار الجديد الآن." });
         if (sub) {
           await renderSubmissionTreeBrowser(ctx, sub.id, sub.course_node_id, env);
         }
@@ -2305,20 +2328,44 @@ export default {
         const matId = parseInt(parts[1], 10);
         const createdFolderId = parseInt(parts[2], 10);
 
+        const backupChannelId = await getBackupChannelId(env);
+        const msgIdsToDelete = new Set<number>();
+
         if (matId > 0) {
-          const deleted = await env.DB.prepare("DELETE FROM materials WHERE id = ? RETURNING backup_message_id").bind(matId).first<{ backup_message_id: number | null }>();
-          const backupChannelId = await getBackupChannelId(env);
-          if (backupChannelId && deleted?.backup_message_id) {
-            await bot.api.deleteMessage(backupChannelId, deleted.backup_message_id).catch(() => {});
+          const deleted = await env.DB.prepare("DELETE FROM materials WHERE id = ? RETURNING backup_message_id")
+            .bind(matId)
+            .first<{ backup_message_id: number | null }>();
+          if (deleted?.backup_message_id) {
+            msgIdsToDelete.add(deleted.backup_message_id);
           }
         }
         if (createdFolderId > 0) {
+          const { results: folderMats } = await env.DB.prepare(
+            `WITH RECURSIVE subnodes(id) AS (
+              SELECT id FROM nodes WHERE id = ?
+              UNION ALL
+              SELECT n.id FROM nodes n JOIN subnodes s ON n.parent_id = s.id
+            )
+            SELECT backup_message_id FROM materials WHERE node_id IN (SELECT id FROM subnodes) AND backup_message_id IS NOT NULL`
+          )
+            .bind(createdFolderId)
+            .all<{ backup_message_id: number }>();
+          for (const fm of folderMats || []) {
+            if (fm.backup_message_id) msgIdsToDelete.add(fm.backup_message_id);
+          }
           await env.DB.prepare("DELETE FROM nodes WHERE id = ?").bind(createdFolderId).run();
         }
+
+        if (backupChannelId && msgIdsToDelete.size > 0) {
+          await Promise.allSettled(
+            Array.from(msgIdsToDelete).map((msgId) => bot.api.deleteMessage(backupChannelId, msgId))
+          );
+        }
+
         await env.DB.prepare("UPDATE submissions SET status = 'ignored' WHERE id = ?").bind(subId).run();
 
         await ctx.deleteMessage().catch(() => {});
-        await ctx.answerCallbackQuery({ text: "🗑️ تم حذف الملف والفولدر نهائياً." });
+        await ctx.answerCallbackQuery({ text: "🗑️ تم حذف الملف والفولدر من البوت والقناة نهائياً." });
         return;
       }
 
@@ -2792,32 +2839,53 @@ export default {
         const dbPromise = (async () => {
           try {
             const backupChannelId = await getBackupChannelId(env);
-            if (backupChannelId) {
-              executionCtx.waitUntil(
-                (async () => {
-                  try {
-                    const { results: subMaterials } = await env.DB.prepare(
-                      `WITH RECURSIVE subnodes(id) AS (
-                        SELECT id FROM nodes WHERE id = ?
-                        UNION ALL
-                        SELECT n.id FROM nodes n JOIN subnodes s ON n.parent_id = s.id
-                      )
-                      SELECT backup_message_id FROM materials WHERE node_id IN (SELECT id FROM subnodes) AND backup_message_id IS NOT NULL`
-                    ).bind(nodeId).all<{ backup_message_id: number }>();
 
-                    if (subMaterials && subMaterials.length > 0) {
-                      for (const sm of subMaterials) {
-                        try {
-                          await ctx.api.deleteMessage(backupChannelId, sm.backup_message_id);
-                        } catch (err) {}
-                      }
-                    }
-                  } catch (e) {}
-                })()
-              );
+            // 1. يجب قراءة أرقام رسائل القناة (backup_message_id) قبل حذف الفولدر من nodes!
+            // لأن حذف الفولدر يمسح المواد التابعة له فوراً عبر ON DELETE CASCADE
+            let backupMsgIds: number[] = [];
+            if (backupChannelId) {
+              try {
+                const { results: subMaterials } = await env.DB.prepare(
+                  `WITH RECURSIVE subnodes(id) AS (
+                    SELECT id FROM nodes WHERE id = ?
+                    UNION ALL
+                    SELECT n.id FROM nodes n JOIN subnodes s ON n.parent_id = s.id
+                  )
+                  SELECT backup_message_id FROM materials WHERE node_id IN (SELECT id FROM subnodes) AND backup_message_id IS NOT NULL`
+                )
+                  .bind(nodeId)
+                  .all<{ backup_message_id: number }>();
+
+                backupMsgIds = (subMaterials || [])
+                  .map((sm) => sm.backup_message_id)
+                  .filter((id): id is number => Boolean(id));
+              } catch (_) {}
             }
 
+            // 2. حذف الفولدر من قاعدة البيانات بعد الاحتفاظ بأرقام رسائل القناة
             await env.DB.prepare("DELETE FROM nodes WHERE id = ?").bind(nodeId).run();
+
+            // 3. حذف رسائل المحتوى من قناة الأرشيف (Resources Channel)
+            if (backupChannelId && backupMsgIds.length > 0) {
+              const immediateBatch = backupMsgIds.slice(0, 15);
+              const remainingBatch = backupMsgIds.slice(15);
+
+              await Promise.allSettled(
+                immediateBatch.map((msgId) => ctx.api.deleteMessage(backupChannelId, msgId))
+              );
+
+              if (remainingBatch.length > 0) {
+                executionCtx.waitUntil(
+                  (async () => {
+                    for (const msgId of remainingBatch) {
+                      try {
+                        await ctx.api.deleteMessage(backupChannelId, msgId);
+                      } catch (_) {}
+                    }
+                  })()
+                );
+              }
+            }
           } catch (err) {
             console.error("DB error deleting node:", err);
           }
@@ -2879,13 +2947,7 @@ export default {
 
             const backupChannelId = await getBackupChannelId(env);
             if (backupChannelId && mat.backup_message_id) {
-              executionCtx.waitUntil(
-                (async () => {
-                  try {
-                    await ctx.api.deleteMessage(backupChannelId, mat.backup_message_id!);
-                  } catch (e) {}
-                })()
-              );
+              await ctx.api.deleteMessage(backupChannelId, mat.backup_message_id!).catch(() => {});
             }
           } catch (err) {
             console.error("DB error deleting material:", err);
