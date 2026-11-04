@@ -353,12 +353,14 @@ export default {
         if (user.bot_state === "uploading") {
           await rollbackUploadSession(ctx, env, user);
         }
-        await updateUserState(env, user.telegram_id, "browsing", null, null, null);
         user.bot_state = "browsing";
         user.current_node_id = null;
         user.managed_node_id = null;
         user.pending_target_id = null;
-        await renderTopLevel(ctx, user, env);
+        await Promise.all([
+          updateUserState(env, user.telegram_id, "browsing", null, null, null),
+          renderTopLevel(ctx, user, env),
+        ]);
         return;
       }
 
@@ -367,12 +369,14 @@ export default {
         if (user.bot_state === "uploading") {
           await rollbackUploadSession(ctx, env, user);
         }
-        await updateUserState(env, user.telegram_id, "browsing", null, null, null);
         user.bot_state = "browsing";
         user.current_node_id = null;
         user.managed_node_id = null;
         user.pending_target_id = null;
-        await renderFolderView(ctx, user, null, env);
+        await Promise.all([
+          updateUserState(env, user.telegram_id, "browsing", null, null, null),
+          renderFolderView(ctx, user, null, env),
+        ]);
         return;
       }
 
@@ -1463,7 +1467,12 @@ export default {
 
       if (text === "⬅️ رجوع" && user.current_node_id !== null) {
         if (user.current_node_id === ADMIN_GUIDE_NODE_ID) {
-          await renderTopLevel(ctx, user, env);
+          user.current_node_id = null;
+          user.bot_state = "browsing";
+          await Promise.all([
+            updateUserState(env, user.telegram_id, "browsing", null, null, null),
+            renderTopLevel(ctx, user, env),
+          ]);
           return;
         }
         const currentNode: NodeRow | null = await env.DB.prepare("SELECT * FROM nodes WHERE id = ?")
@@ -1474,14 +1483,14 @@ export default {
           currentNode?.parent_id && currentNode.parent_id !== currentNode.id
             ? currentNode.parent_id
             : null;
-        await updateUserState(env, user.telegram_id, "browsing", parentId, null, null);
         user.current_node_id = parentId;
         user.bot_state = "browsing";
-        if (parentId === null && isPrivileged(user)) {
-          await renderTopLevel(ctx, user, env);
-        } else {
-          await renderFolderView(ctx, user, parentId, env);
-        }
+        await Promise.all([
+          updateUserState(env, user.telegram_id, "browsing", parentId, null, null),
+          parentId === null && isPrivileged(user)
+            ? renderTopLevel(ctx, user, env)
+            : renderFolderView(ctx, user, parentId, env),
+        ]);
         return;
       }
 
@@ -1737,12 +1746,12 @@ export default {
           .first<NodeRow>();
 
         if (childNode) {
-          const subChildrenCount = await env.DB.prepare(
-            "SELECT COUNT(*) as count FROM nodes WHERE parent_id = ?"
-          ).bind(childNode.id).first<{ count: number }>();
+          const [subChildren, userCanManageChild] = await Promise.all([
+            getChildNodes(env, childNode.id),
+            canManage(env, user, childNode.id),
+          ]);
 
-          const hasSubfolders = Boolean(subChildrenCount && subChildrenCount.count > 0);
-          const userCanManageChild = await canManage(env, user, childNode.id);
+          const hasSubfolders = subChildren.length > 0;
 
           // Only stay outside if user is NOT in admin manage mode AND folder has no subfolders
           if (!userCanManageChild && !hasSubfolders) {
@@ -1758,10 +1767,15 @@ export default {
             return;
           }
 
-          // Navigate inside the folder and update current_node_id!
-          await updateUserState(env, user.telegram_id, "browsing", childNode.id, null, null);
+          // Navigate inside the folder: run state update and folder rendering in parallel!
           user.current_node_id = childNode.id;
-          await renderFolderView(ctx, user, childNode.id, env);
+          await Promise.all([
+            updateUserState(env, user.telegram_id, "browsing", childNode.id, null, null),
+            renderFolderView(ctx, user, childNode.id, env, {
+              children: subChildren,
+              isManager: userCanManageChild,
+            }),
+          ]);
           return;
         }
       }

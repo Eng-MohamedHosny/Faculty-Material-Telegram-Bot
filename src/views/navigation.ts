@@ -79,14 +79,37 @@ export async function renderNotificationToggleCard(ctx: any, user: UserRow, env:
   }
 }
 
-export async function renderFolderView(ctx: any, user: UserRow, nodeId: number | null, env: Env): Promise<void> {
-  const [children, materials, isManager, hierarchy] = await Promise.all([
-    getChildNodes(env, nodeId),
+export interface PreloadedFolderData {
+  children?: NodeRow[];
+  isManager?: boolean;
+}
+
+export async function renderFolderView(
+  ctx: any,
+  user: UserRow,
+  nodeId: number | null,
+  env: Env,
+  preloaded?: PreloadedFolderData
+): Promise<void> {
+  const [children, materials, isManager, hierarchy, hasDescendantRow] = await Promise.all([
+    preloaded?.children !== undefined ? Promise.resolve(preloaded.children) : getChildNodes(env, nodeId),
     nodeId !== null ? getNodeMaterials(env, nodeId) : Promise.resolve([]),
-    canManage(env, user, nodeId),
+    preloaded?.isManager !== undefined ? Promise.resolve(preloaded.isManager) : canManage(env, user, nodeId),
     nodeId !== null
       ? getNodeHierarchy(env, nodeId)
       : Promise.resolve({ rootDept: null, semesterNode: null, courseNode: null, depth: 0, breadcrumb: "" }),
+    nodeId !== null
+      ? env.DB.prepare(
+          `WITH RECURSIVE subnodes(id) AS (
+             SELECT id FROM nodes WHERE id = ?
+             UNION ALL
+             SELECT n.id FROM nodes n JOIN subnodes s ON n.parent_id = s.id
+           )
+           SELECT 1 FROM materials WHERE node_id IN (SELECT id FROM subnodes) LIMIT 1`
+        )
+          .bind(nodeId)
+          .first()
+      : Promise.resolve(null),
   ]);
   const { rootDept, courseNode } = hierarchy;
   const privileged = isPrivileged(user);
@@ -162,21 +185,8 @@ export async function renderFolderView(ctx: any, user: UserRow, nodeId: number |
 
   // 1. زر "📦 عرض وتحميل كل المحتوى" يظهر فقط داخل المادة الدراسية أو أقسامها الفرعية (courseNode !== null)
   // ولا يظهر أبداً في مستوى الأقسام أو مستوى الترم الأول والترم الثاني
-  if (nodeId !== null && courseNode !== null && children.length > 0) {
-    const hasDescendantMaterials = await env.DB.prepare(
-      `WITH RECURSIVE subnodes(id) AS (
-         SELECT id FROM nodes WHERE id = ?
-         UNION ALL
-         SELECT n.id FROM nodes n JOIN subnodes s ON n.parent_id = s.id
-       )
-       SELECT 1 FROM materials WHERE node_id IN (SELECT id FROM subnodes) LIMIT 1`
-    )
-      .bind(nodeId)
-      .first();
-
-    if (hasDescendantMaterials) {
-      keyboard.text("📦 عرض وتحميل كل المحتوى").row();
-    }
+  if (nodeId !== null && courseNode !== null && children.length > 0 && hasDescendantRow) {
+    keyboard.text("📦 عرض وتحميل كل المحتوى").row();
   }
 
   // تم حذف زر "📥 عرض المحتوى والملفات" نهائياً لمنع ازدواجية الأزرار
