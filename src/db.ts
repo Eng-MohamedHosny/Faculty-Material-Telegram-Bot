@@ -261,6 +261,8 @@ export async function getNodeMaterials(env: Env, nodeId: number): Promise<Materi
 
 /**
  * Enhanced full-depth recursive material collector for "📦 عرض وتحميل كل المحتوى"
+ * Uses Depth-First Traversal (sort_path) so all subfolders of one section (e.g. Lectures -> Lecture 1, Lecture 2...)
+ * are displayed in order before moving to the next section (e.g. Sections -> Section 1, Section 2...).
  */
 export async function getAllDescendantMaterialsGrouped(
   env: Env,
@@ -270,15 +272,20 @@ export async function getAllDescendantMaterialsGrouped(
     .bind(nodeId)
     .first<{ id: number; title: string }>();
 
+  // استخدام sort_path لضمان الترتيب الشجري العميق (Depth-First Search):
+  // ينهي كل فولدرات القسم الأول (مثلاً المحاضرات: Lecture 1, Lecture 2...) قبل الانتقال للقسم الثاني (السكاشن...)
   const { results: descNodes } = await env.DB.prepare(
-    `WITH RECURSIVE tree(id, title, depth, sort_order) AS (
-      SELECT id, title, 1, sort_order FROM nodes WHERE parent_id = ?
+    `WITH RECURSIVE tree(id, title, sort_path) AS (
+      SELECT id, title, printf('%05d_%010d', COALESCE(sort_order, 0), id)
+      FROM nodes WHERE parent_id = ? AND id != ?
       UNION ALL
-      SELECT n.id, tree.title || ' / ' || n.title, tree.depth + 1, n.sort_order
+      SELECT n.id,
+             tree.title || ' ⬅️ ' || n.title,
+             tree.sort_path || '/' || printf('%05d_%010d', COALESCE(n.sort_order, 0), n.id)
       FROM nodes n JOIN tree ON n.parent_id = tree.id
     )
-    SELECT id, title FROM tree ORDER BY depth ASC, sort_order ASC, id ASC`
-  ).bind(nodeId).all<{ id: number; title: string }>();
+    SELECT id, title FROM tree ORDER BY sort_path ASC`
+  ).bind(nodeId, nodeId).all<{ id: number; title: string }>();
 
   const allNodes: { id: number; title: string }[] = [];
   if (currentNode) {

@@ -26,6 +26,7 @@ export interface UserRow {
     | "awaiting_admin_broadcast"
     | "awaiting_submission"
     | "awaiting_submission_folder"
+    | "awaiting_edit_sub_text"
     | "awaiting_task_title"
     | "awaiting_task_days"
     | "awaiting_task_attachment"
@@ -86,7 +87,7 @@ export interface SubmissionRow {
   student_name: string | null;
   file_name: string;
   telegram_file_id: string;
-  file_type: "document" | "photo" | "video" | "audio";
+  file_type: "document" | "photo" | "video" | "audio" | "text";
   caption: string | null;
   backup_message_id: number | null;
   status: "pending" | "approved" | "ignored";
@@ -110,6 +111,7 @@ export interface WeeklyTaskRow {
 export const RESERVED_PATTERNS = [
   "Back", "Cancel", "رجوع", "الرئيسية", "إلغاء",
   "إلغاء الأمر", "تبديل الوضع", "إنهاء الحفظ", "✅ إنهاء الحفظ",
+  "إنهاء الحفظ وإرسال للمشرف", "✅ إنهاء الحفظ وإرسال للمشرف",
   "إنهاء الرفع", "✅ إنهاء الرفع", "إنهاء وإرسال الإشعار", "✅ إنهاء وإرسال الإشعار",
   "إلغاء الرفع", "عن البوت", "حذف خانة أو ملف", "تعديل الاسم",
   "إضافة خانة/مادة", "إضافة قسم جديد", "رفع المحتوى هنا", "رفع ملفات هنا",

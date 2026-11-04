@@ -53,6 +53,25 @@ export { Env } from "./types";
 
 let cachedBotInfo: any = undefined;
 
+function buildSubmissionReviewKeyboard(subId: number, fileType: string, hasCaption: boolean): InlineKeyboard {
+  const kb = new InlineKeyboard()
+    .text("🧭 اختيار مجلد النشر وتحديد مساره", `sub_pick_folder:${subId}`)
+    .row();
+
+  if (fileType === "text") {
+    kb.text("✏️ تعديل نص الرسالة قبل النشر", `sub_edit_text:${subId}`).row();
+  } else {
+    kb.text("✏️ تعديل/إضافة وصف للملف", `sub_edit_text:${subId}`);
+    if (hasCaption) {
+      kb.text("🧹 إزالة الوصف", `sub_clear_caption:${subId}`);
+    }
+    kb.row();
+  }
+
+  kb.text("🗑️ تجاهل وحذف هذا العنصر", `sub_ignore:${subId}`);
+  return kb;
+}
+
 export default {
   async scheduled(event: ScheduledEvent, env: Env, executionCtx: ExecutionContext): Promise<void> {
     executionCtx.waitUntil(processBroadcastQueue(env));
@@ -74,6 +93,20 @@ export default {
       env.BOT_TOKEN,
       cachedBotInfo ? { botInfo: cachedBotInfo } : undefined
     );
+
+    // إظهار "Hello Engineer 👀" في خانة الكتابة لجميع الكيبوردات في البوت تلقائياً
+    bot.api.config.use((prev, method, payload: any, signal) => {
+      if (
+        payload &&
+        payload.reply_markup &&
+        typeof payload.reply_markup === "object" &&
+        "keyboard" in payload.reply_markup &&
+        !payload.reply_markup.input_field_placeholder
+      ) {
+        payload.reply_markup.input_field_placeholder = "Hello Engineer 👀";
+      }
+      return prev(method, payload, signal);
+    });
 
     bot.catch(async (err) => {
       console.error("Unhandled Grammy Error:", err.error || err);
@@ -389,7 +422,13 @@ export default {
 
       // 4. Cancellation Guard for active input states (excluding Home which is already handled above)
       let isNavCancel = false;
-      if (user.bot_state === "uploading") {
+      if (
+        user.bot_state === "uploading" ||
+        user.bot_state === "awaiting_submission" ||
+        user.bot_state === "awaiting_edit_sub_text" ||
+        user.bot_state === "awaiting_broadcast" ||
+        user.bot_state === "awaiting_admin_broadcast"
+      ) {
         isNavCancel =
           text === "❌ إلغاء" ||
           text === "إلغاء" ||
@@ -404,6 +443,8 @@ export default {
             text === "✅ إنهاء الحفظ" ||
             text === "إنهاء الحفظ" ||
             text === "انهاء الحفظ" ||
+            text === "✅ إنهاء الحفظ وإرسال للمشرف" ||
+            text === "إنهاء الحفظ وإرسال للمشرف" ||
             text === "إنهاء الرفع" ||
             text === "انهاء الرفع" ||
             (text.startsWith("/") && !text.startsWith("/promote") && !text.startsWith("/demote")));
@@ -419,7 +460,13 @@ export default {
             .bind(`broadcast_draft_${user.telegram_id}`)
             .run();
         }
+        if (user.bot_state === "awaiting_submission") {
+          await env.DB.prepare("DELETE FROM settings WHERE key = ?")
+            .bind(`sub_draft_${user.telegram_id}`)
+            .run();
+        }
         const wasBroadcasting = user.bot_state === "awaiting_broadcast" || user.bot_state === "awaiting_admin_broadcast";
+        const wasSubmitting = user.bot_state === "awaiting_submission";
         await updateUserState(env, user.telegram_id, "browsing", user.current_node_id, null, null);
         user.bot_state = "browsing";
         user.managed_node_id = null;
@@ -430,6 +477,8 @@ export default {
             cancelMsg = `❌ تم إلغاء الرفع والتراجع عن حفظ (${rolledBackCount}) عنصر وحذفه من القناة.`;
           } else if (wasBroadcasting) {
             cancelMsg = "❌ تم إلغاء الإشعار وحذف المسودة دون إرسال أي رسائل.";
+          } else if (wasSubmitting) {
+            cancelMsg = "❌ تم إلغاء المساهمة وحذف المسودة.";
           }
           await ctx.reply(cancelMsg);
           await renderFolderView(ctx, user, user.current_node_id, env);
@@ -442,9 +491,14 @@ export default {
         (text === "✅ إنهاء الحفظ" ||
           text === "إنهاء الحفظ" ||
           text === "انهاء الحفظ" ||
+          text === "✅ إنهاء الحفظ وإرسال للمشرف" ||
+          text === "إنهاء الحفظ وإرسال للمشرف" ||
           text === "إنهاء الرفع" ||
           text === "انهاء الرفع") &&
-        user.bot_state !== "uploading"
+        user.bot_state !== "uploading" &&
+        user.bot_state !== "awaiting_submission" &&
+        user.bot_state !== "awaiting_broadcast" &&
+        user.bot_state !== "awaiting_admin_broadcast"
       ) {
         await renderFolderView(ctx, user, user.current_node_id, env);
         return;
@@ -610,7 +664,7 @@ export default {
         return;
       }
 
-      // State: AWAITING SUBMISSION (Student Crowdsourcing)
+      // State: AWAITING SUBMISSION (Student Crowdsourcing — Transactional Multi-Item Session)
       if (user.bot_state === "awaiting_submission") {
         const courseId = user.pending_target_id;
         if (!courseId) {
@@ -620,10 +674,148 @@ export default {
           return ctx.reply("حدث خطأ.");
         }
 
+        const draftKey = `sub_draft_${user.telegram_id}`;
+
+        // أ) عند ضغط الطالب على "✅ إنهاء الحفظ وإرسال للمشرف"
+        if (
+          text === "✅ إنهاء الحفظ وإرسال للمشرف" ||
+          text === "إنهاء الحفظ وإرسال للمشرف" ||
+          text === "✅ إنهاء الحفظ" ||
+          text === "إنهاء الحفظ"
+        ) {
+          const draftRow = await env.DB.prepare("SELECT value FROM settings WHERE key = ?")
+            .bind(draftKey)
+            .first<{ value: string }>();
+
+          const items: {
+            fileName: string;
+            fileId: string;
+            fileType: SubmissionRow["file_type"];
+            caption: string | null;
+          }[] = draftRow?.value ? JSON.parse(draftRow.value) : [];
+
+          if (items.length === 0) {
+            return ctx.reply(
+              "⚠️ لم تقم بإرسال أي محتوى بعد! أرسل الملفات أو النصوص أولاً، أو اضغط [❌ إلغاء] للتراجع."
+            );
+          }
+
+          const courseNode = await env.DB.prepare("SELECT title FROM nodes WHERE id = ?")
+            .bind(courseId)
+            .first<{ title: string }>();
+
+          const insertedSubs: {
+            subId: number;
+            item: {
+              fileName: string;
+              fileId: string;
+              fileType: SubmissionRow["file_type"];
+              caption: string | null;
+            };
+          }[] = [];
+
+          for (const item of items) {
+            const subRes = await env.DB.prepare(
+              `INSERT INTO submissions (course_node_id, student_id, student_name, file_name, telegram_file_id, file_type, caption, status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'pending') RETURNING id`
+            )
+              .bind(
+                courseId,
+                user.telegram_id,
+                user.full_name || "طالب",
+                item.fileName,
+                item.fileId,
+                item.fileType,
+                item.caption
+              )
+              .first<{ id: number }>();
+
+            if (subRes?.id) {
+              insertedSubs.push({ subId: subRes.id, item });
+            }
+          }
+
+          await env.DB.prepare("DELETE FROM settings WHERE key = ?").bind(draftKey).run();
+          await updateUserState(env, user.telegram_id, "browsing", user.current_node_id, null, null);
+          user.bot_state = "browsing";
+          user.pending_target_id = null;
+
+          await ctx.reply(
+            `❤️ **شكراً لمساهمتك الجميلة يا ${user.full_name || "بطل"}!**\n\n` +
+              `تم استلام **(${insertedSubs.length})** عنصر بنجاح لمراجعتها واعتمادها في مادة **${courseNode?.title || "المقرر"}**.\n` +
+              `ستظهر لجميع زملائك فور اعتمادها وتوزيعها من ليدر المادة! 🚀`,
+            { parse_mode: "Markdown" }
+          );
+
+          // إرسال بطاقات المراجعة المستقلة لكل عنصر إلى مشرفي القسم
+          if (insertedSubs.length > 0) {
+            const { rootDept } = await getNodeHierarchy(env, courseId);
+            if (rootDept) {
+              const { results: leaders } = await env.DB.prepare(
+                `SELECT u.telegram_id FROM users u
+                 JOIN user_permissions p ON u.telegram_id = p.telegram_id
+                 WHERE p.node_id = ?`
+              )
+                .bind(rootDept.id)
+                .all<{ telegram_id: number }>();
+
+              const leaderIds = new Set((leaders || []).map((l) => l.telegram_id));
+              if (env.SUPER_ADMIN_ID) leaderIds.add(parseInt(env.SUPER_ADMIN_ID, 10));
+
+              for (const lId of leaderIds) {
+                for (const { subId, item } of insertedSubs) {
+                  try {
+                    const actionKb = buildSubmissionReviewKeyboard(
+                      subId,
+                      item.fileType,
+                      Boolean(item.caption)
+                    );
+
+                    if (item.fileType === "text") {
+                      const textPrompt =
+                        `📩 مساهمة طلابية نصية جديدة بانتظار المراجعة:\n\n` +
+                        `• المادة: ${courseNode?.title || "المقرر"}\n` +
+                        `• الطالب: ${user.full_name || "طالب"} (${user.telegram_id})\n` +
+                        `• نص الرسالة:\n` +
+                        `────────────────\n` +
+                        `${item.caption || item.fileName}\n` +
+                        `────────────────\n` +
+                        `اختر الإجراء المناسب (يمكنك تعديل النص أو اختيار مجلد النشر مباشرة) 👇`;
+                      await bot.api.sendMessage(lId, textPrompt, { reply_markup: actionKb });
+                    } else {
+                      const mediaPrompt =
+                        `📩 مساهمة طلابية جديدة بانتظار المراجعة:\n\n` +
+                        `• المادة: ${courseNode?.title || "المقرر"}\n` +
+                        `• الطالب: ${user.full_name || "طالب"} (${user.telegram_id})\n` +
+                        `• الملف: ${item.fileName}\n` +
+                        (item.caption ? `• الوصف: ${item.caption}\n\n` : "\n") +
+                        `اختر الإجراء المناسب 👇`;
+
+                      if (item.fileType === "photo") {
+                        await bot.api.sendPhoto(lId, item.fileId, { caption: mediaPrompt, reply_markup: actionKb });
+                      } else if (item.fileType === "video") {
+                        await bot.api.sendVideo(lId, item.fileId, { caption: mediaPrompt, reply_markup: actionKb });
+                      } else if (item.fileType === "audio") {
+                        await bot.api.sendAudio(lId, item.fileId, { caption: mediaPrompt, reply_markup: actionKb });
+                      } else {
+                        await bot.api.sendDocument(lId, item.fileId, { caption: mediaPrompt, reply_markup: actionKb });
+                      }
+                    }
+                  } catch (_) {}
+                }
+              }
+            }
+          }
+
+          await renderFolderView(ctx, user, user.current_node_id, env);
+          return;
+        }
+
+        // ب) استقبال عنصر جديد من الطالب (ملف، صورة، فيديو، صوت، أو رسالة نصية) وإضافته للمسودة بصمت
         let fileId: string | null = null;
         let fileName = "Unnamed File";
         let fileType: SubmissionRow["file_type"] = "document";
-        const caption = ctx.message.caption || ctx.message.text || null;
+        let caption: string | null = ctx.message.caption || null;
 
         if (ctx.message.document) {
           fileId = ctx.message.document.file_id;
@@ -642,77 +834,96 @@ export default {
           fileId = ctx.message.audio.file_id;
           fileName = ctx.message.audio.file_name || "Audio.mp3";
           fileType = "audio";
+        } else if (ctx.message.text) {
+          const rawText = ctx.message.text.trim();
+          if (
+            isReservedButton(rawText) ||
+            rawText.includes("اختر من القوائم") ||
+            rawText.includes("الملفات المتاحة")
+          ) {
+            return ctx.reply(
+              "⚠️ أنت الآن في وضع إرسال مساهمة. أرسل الملفات أو النصوص المطلوبة ثم اضغط [✅ إنهاء الحفظ وإرسال للمشرف]، أو اضغط [❌ إلغاء] للتراجع."
+            );
+          }
+          fileId = "text_content";
+          fileType = "text";
+          caption = ctx.message.text;
+          const firstLine = ctx.message.text.split("\n")[0].trim();
+          fileName = `📝 ${firstLine.substring(0, 40) || "ملاحظة نصية"}`;
         }
 
         if (!fileId) {
-          return ctx.reply("⚠️ يرجى إرسال ملف PDF، صورة، أو فيديو صالح، أو اضغط زر [❌ إلغاء].");
+          return ctx.reply(
+            "⚠️ يرجى إرسال ملف PDF، صورة، فيديو، أو رسالة نصية، ثم اضغط [✅ إنهاء الحفظ وإرسال للمشرف]، أو اضغط [❌ إلغاء]."
+          );
         }
 
-        const courseNode = await env.DB.prepare("SELECT title FROM nodes WHERE id = ?")
-          .bind(courseId)
-          .first<{ title: string }>();
+        const draftRow = await env.DB.prepare("SELECT value FROM settings WHERE key = ?")
+          .bind(draftKey)
+          .first<{ value: string }>();
 
-        const subRes = await env.DB.prepare(
-          `INSERT INTO submissions (course_node_id, student_id, student_name, file_name, telegram_file_id, file_type, caption, status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'pending') RETURNING id`
-        )
-          .bind(courseId, user.telegram_id, user.full_name || "طالب", fileName, fileId, fileType, caption)
-          .first<{ id: number }>();
+        const items: {
+          fileName: string;
+          fileId: string;
+          fileType: SubmissionRow["file_type"];
+          caption: string | null;
+        }[] = draftRow?.value ? JSON.parse(draftRow.value) : [];
 
-        const subId = subRes?.id;
+        items.push({ fileName, fileId, fileType, caption });
+
+        await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)")
+          .bind(draftKey, JSON.stringify(items))
+          .run();
+
+        // حفظ العنصر بصمت في المسودة حتى ينتهي الطالب ويضغط "✅ إنهاء الحفظ وإرسال للمشرف"
+        return;
+      }
+
+      // State: AWAITING EDIT SUBMISSION TEXT (Leader edits student's text or caption before publishing)
+      if (user.bot_state === "awaiting_edit_sub_text") {
+        const subId = user.pending_target_id;
+        if (!subId || !text || isReservedButton(text)) {
+          return ctx.reply("⚠️ يرجى إرسال النص المعدّل الجديد، أو اضغط [❌ إلغاء] للتراجع.");
+        }
+
+        const sub = await env.DB.prepare("SELECT * FROM submissions WHERE id = ?")
+          .bind(subId)
+          .first<SubmissionRow>();
+        if (!sub) {
+          await updateUserState(env, user.telegram_id, "browsing", user.current_node_id, null, null);
+          user.bot_state = "browsing";
+          user.pending_target_id = null;
+          return ctx.reply("⚠️ المساهمة لم تعد موجودة.");
+        }
+
+        const newFileName =
+          sub.file_type === "text"
+            ? `📝 ${text.split("\n")[0].trim().substring(0, 40) || "ملاحظة نصية"}`
+            : sub.file_name;
+
+        await env.DB.prepare("UPDATE submissions SET caption = ?, file_name = ? WHERE id = ?")
+          .bind(text, newFileName, subId)
+          .run();
 
         await updateUserState(env, user.telegram_id, "browsing", user.current_node_id, null, null);
         user.bot_state = "browsing";
         user.pending_target_id = null;
 
+        const courseNode = await env.DB.prepare("SELECT title FROM nodes WHERE id = ?")
+          .bind(sub.course_node_id)
+          .first<{ title: string }>();
+        const reviewKb = buildSubmissionReviewKeyboard(subId, sub.file_type, true);
+
         await ctx.reply(
-          `❤️ **شكراً لمساهمتك الجميلة يا ${user.full_name || "بطل"}!**\n\n` +
-            `تم استلام الملف بنجاح لمراجعته واعتماده في مادة **${courseNode?.title || "المقرر"}**.\n` +
-            `سيظهر لجميع زملائك فور اعتماده من ليدر المادة! 🚀`,
-          { parse_mode: "Markdown" }
+          `✅ تم تحديث النص بنجاح!\n\n` +
+            `• المادة: ${courseNode?.title || "المقرر"}\n` +
+            `• النص الجديد المعتمد للنشر:\n` +
+            `────────────────\n` +
+            `${text}\n` +
+            `────────────────\n` +
+            `👇 اضغط الآن على [🧭 اختيار مجلد النشر وتحديد مساره] لوضع المساهمة في مكانها المناسب:`,
+          { reply_markup: reviewKb }
         );
-
-        // Notify leaders of this course
-        if (subId) {
-          const { rootDept } = await getNodeHierarchy(env, courseId);
-          if (rootDept) {
-            const { results: leaders } = await env.DB.prepare(
-              `SELECT u.telegram_id FROM users u
-               JOIN user_permissions p ON u.telegram_id = p.telegram_id
-               WHERE p.node_id = ?`
-            )
-              .bind(rootDept.id)
-              .all<{ telegram_id: number }>();
-
-            const leaderIds = new Set((leaders || []).map((l) => l.telegram_id));
-            if (env.SUPER_ADMIN_ID) leaderIds.add(parseInt(env.SUPER_ADMIN_ID, 10));
-
-            const actionKb = new InlineKeyboard().text("🧭 اختيار مجلد النشر وتحديد مساره", `sub_pick_folder:${subId}`).row();
-
-            const promptMsg =
-              `📩 **مساهمة طلابية جديدة بانتظار المراجعة:**\n\n` +
-              `• المادة: **${courseNode?.title}**\n` +
-              `• الطالب: **${user.full_name || "طالب"}** (\`${user.telegram_id}\`)\n` +
-              `• الملف: \`${fileName}\`\n` +
-              (caption ? `• الوصف: ${caption}\n\n` : "\n") +
-              `اختر الإجراء المناسب 👇`;
-
-            for (const lId of leaderIds) {
-              try {
-                if (fileType === "photo") {
-                  await bot.api.sendPhoto(lId, fileId, { caption: promptMsg, parse_mode: "Markdown", reply_markup: actionKb });
-                } else if (fileType === "video") {
-                  await bot.api.sendVideo(lId, fileId, { caption: promptMsg, parse_mode: "Markdown", reply_markup: actionKb });
-                } else if (fileType === "audio") {
-                  await bot.api.sendAudio(lId, fileId, { caption: promptMsg, parse_mode: "Markdown", reply_markup: actionKb });
-                } else {
-                  await bot.api.sendDocument(lId, fileId, { caption: promptMsg, parse_mode: "Markdown", reply_markup: actionKb });
-                }
-              } catch (e) {}
-            }
-          }
-        }
-
         await renderFolderView(ctx, user, user.current_node_id, env);
         return;
       }
@@ -1282,31 +1493,43 @@ export default {
         }
 
         for (const g of groups) {
-          await ctx.reply(`📂 **[ ${g.folderPath} ]**`, { parse_mode: "Markdown" });
+          try {
+            await ctx.reply(`📂 **[ ${g.folderPath} ]**`, { parse_mode: "Markdown" });
+          } catch (_) {
+            await ctx.reply(`📂 [ ${g.folderPath} ]`);
+          }
           await sendBatchMaterials(ctx, g.materials, env);
         }
         return;
       }
 
-      // Student Action: Crowdsource note contribution
+      // Student Action: Crowdsource note contribution (Transactional Multi-Item Session)
       if (text === "📝 ساهم بملخص أو امتحان" && user.current_node_id) {
         const { courseNode } = await getNodeHierarchy(env, user.current_node_id);
         if (!courseNode) {
           return ctx.reply("⚠️ يرجى الدخول لمادة دراسية أولاً للمساهمة فيها.");
         }
 
+        await env.DB.prepare("DELETE FROM settings WHERE key = ?")
+          .bind(`sub_draft_${user.telegram_id}`)
+          .run();
+
         await updateUserState(env, user.telegram_id, "awaiting_submission", user.current_node_id, null, courseNode.id);
         user.bot_state = "awaiting_submission";
         user.pending_target_id = courseNode.id;
 
-        const cancelKeyboard = new Keyboard().text("❌ إلغاء").resized();
+        const subKeyboard = new Keyboard()
+          .text("✅ إنهاء الحفظ وإرسال للمشرف")
+          .row()
+          .text("❌ إلغاء")
+          .resized();
+
         await ctx.reply(
           `📝 **مساهمة طلابية — [${courseNode.title}]:**\n\n` +
-            `أرسل الآن ملف الـ PDF، أو الصور، أو التلخيص لمشاركته مع زملائك.\n` +
-            `(يمكنك كتابة وصف مع الملف إن أحببت)\n\n` +
-            `⚠️ سيتم مراجعة الملف واعتماده من ليدر المادة قبل نشره للجميع.\n` +
-            `اضغط [❌ إلغاء] للتراجع.`,
-          { parse_mode: "Markdown", reply_markup: cancelKeyboard }
+            `أرسل الآن كل ما تريد مشاركته مع زملائك دفعة واحدة (يمكنك إرسال عدة ملفات PDF، صور، فيديوهات، أو رسائل نصية وتلخيصات مكتوبة وروابط).\n\n` +
+            `• عند الانتهاء من إرسال كل المحتوى، اضغط **[✅ إنهاء الحفظ وإرسال للمشرف]**.\n` +
+            `• أو اضغط **[❌ إلغاء]** للتراجع وحذف المسودة.`,
+          { parse_mode: "Markdown", reply_markup: subKeyboard }
         );
         return;
       }
@@ -1905,6 +2128,75 @@ export default {
         await env.DB.prepare("UPDATE submissions SET status = 'ignored' WHERE id = ?").bind(subId).run();
         await ctx.deleteMessage().catch(() => {});
         await ctx.answerCallbackQuery({ text: "🗑️ تم التجاهل والحذف بصمت." });
+        return;
+      }
+
+      // Moderation: Clear file caption in one click
+      if (data.startsWith("sub_clear_caption:")) {
+        const subId = parseInt(data.replace("sub_clear_caption:", ""), 10);
+        const sub = await env.DB.prepare("SELECT * FROM submissions WHERE id = ?").bind(subId).first<SubmissionRow>();
+        if (!sub) {
+          await ctx.answerCallbackQuery({ text: "المساهمة غير موجودة", show_alert: true });
+          return;
+        }
+        await env.DB.prepare("UPDATE submissions SET caption = NULL WHERE id = ?").bind(subId).run();
+        await ctx.answerCallbackQuery({ text: "✅ تم مسح الوصف المرفق بالملف! يمكنك الآن اختيار مجلد النشر." });
+
+        const courseNode = await env.DB.prepare("SELECT title FROM nodes WHERE id = ?")
+          .bind(sub.course_node_id)
+          .first<{ title: string }>();
+        const updatedPrompt =
+          `📩 مساهمة طلابية بانتظار المراجعة (تم مسح الوصف):\n\n` +
+          `• المادة: ${courseNode?.title || "المقرر"}\n` +
+          `• الطالب: ${sub.student_name || "طالب"} (${sub.student_id})\n` +
+          `• الملف: ${sub.file_name}\n\n` +
+          `اختر الإجراء المناسب 👇`;
+
+        const newKb = buildSubmissionReviewKeyboard(sub.id, sub.file_type, false);
+        try {
+          await ctx.editMessageCaption({ caption: updatedPrompt, reply_markup: newKb });
+        } catch {
+          try {
+            await ctx.editMessageText(updatedPrompt, { reply_markup: newKb });
+          } catch (_) {}
+        }
+        return;
+      }
+
+      // Moderation: Edit submission text or file caption before publishing
+      if (data.startsWith("sub_edit_text:")) {
+        const subId = parseInt(data.replace("sub_edit_text:", ""), 10);
+        const sub = await env.DB.prepare("SELECT * FROM submissions WHERE id = ?").bind(subId).first<SubmissionRow>();
+        if (!sub) {
+          await ctx.answerCallbackQuery({ text: "المساهمة غير موجودة", show_alert: true });
+          return;
+        }
+
+        await updateUserState(env, user.telegram_id, "awaiting_edit_sub_text", user.current_node_id, null, subId);
+        user.bot_state = "awaiting_edit_sub_text";
+        user.pending_target_id = subId;
+
+        await ctx.answerCallbackQuery();
+        const cancelKb = new Keyboard().text("❌ إلغاء").resized();
+        const currentText = sub.caption || (sub.file_type === "text" ? sub.file_name : "لا يوجد نص حالياً");
+
+        try {
+          await ctx.reply(
+            `✏️ **تعديل نص المساهمة قبل النشر:**\n\n` +
+              `📋 **النص الحالي المرسل من الطالب (اضغط عليه لنسخه وتعديله):**\n` +
+              `\`${currentText.replace(/`/g, "'")}\`\n\n` +
+              `✍️ **أرسل الآن النص الجديد بعد التعديل** (مثلاً بعد حذف السلام أو تنسيق العنوان) ليتم اعتماده، أو اضغط [❌ إلغاء]:`,
+            { parse_mode: "Markdown", reply_markup: cancelKb }
+          );
+        } catch (_) {
+          await ctx.reply(
+            `✏️ تعديل نص المساهمة قبل النشر:\n\n` +
+              `📋 النص الحالي المرسل من الطالب:\n` +
+              `${currentText}\n\n` +
+              `✍️ أرسل الآن النص الجديد بعد التعديل ليتم اعتماده، أو اضغط [❌ إلغاء]:`,
+            { reply_markup: cancelKb }
+          );
+        }
         return;
       }
 

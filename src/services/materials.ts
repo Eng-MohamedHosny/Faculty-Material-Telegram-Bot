@@ -11,34 +11,30 @@ export async function backupSubmissionToChannel(
   const backupChannelId = await getBackupChannelId(env);
   if (!backupChannelId) return null;
 
-  const backupCaption =
-    `📄 **مساهمة طلابية معتمدة:** ${sub.file_name}\n` +
-    `📂 **المجلد:** ${targetFolderTitle}\n` +
-    `👤 **الطالب:** ${sub.student_name || "طالب"} (\`${sub.student_id}\`)\n` +
-    (sub.caption ? `📝 **الوصف:** ${sub.caption}` : "");
-
   try {
+    // إذا كانت المساهمة عبارة عن رسالة نصية، نرسل النص الصافي (بعد تعديل المشرف إن وجد) إلى قناة الأرشيف
+    // حتى يتم نسخه للطلاب كرسالة نصية نظيفة تماماً عند فتح المجلد
+    if (sub.file_type === "text") {
+      const cleanText = sub.caption || sub.file_name;
+      const res = await bot.api.sendMessage(backupChannelId, cleanText);
+      return res?.message_id || null;
+    }
+
+    const backupCaption =
+      `📄 مساهمة طلابية معتمدة: ${sub.file_name}\n` +
+      `📂 المجلد: ${targetFolderTitle}\n` +
+      `👤 الطالب: ${sub.student_name || "طالب"} (${sub.student_id})\n` +
+      (sub.caption ? `📝 الوصف: ${sub.caption}` : "");
+
     let res: any = null;
     if (sub.file_type === "photo") {
-      res = await bot.api.sendPhoto(backupChannelId, sub.telegram_file_id, {
-        caption: backupCaption,
-        parse_mode: "Markdown",
-      });
+      res = await bot.api.sendPhoto(backupChannelId, sub.telegram_file_id, { caption: backupCaption });
     } else if (sub.file_type === "video") {
-      res = await bot.api.sendVideo(backupChannelId, sub.telegram_file_id, {
-        caption: backupCaption,
-        parse_mode: "Markdown",
-      });
+      res = await bot.api.sendVideo(backupChannelId, sub.telegram_file_id, { caption: backupCaption });
     } else if (sub.file_type === "audio") {
-      res = await bot.api.sendAudio(backupChannelId, sub.telegram_file_id, {
-        caption: backupCaption,
-        parse_mode: "Markdown",
-      });
+      res = await bot.api.sendAudio(backupChannelId, sub.telegram_file_id, { caption: backupCaption });
     } else {
-      res = await bot.api.sendDocument(backupChannelId, sub.telegram_file_id, {
-        caption: backupCaption,
-        parse_mode: "Markdown",
-      });
+      res = await bot.api.sendDocument(backupChannelId, sub.telegram_file_id, { caption: backupCaption });
     }
     return res?.message_id || null;
   } catch (err) {
@@ -48,76 +44,85 @@ export async function backupSubmissionToChannel(
 }
 
 export async function sendBatchMaterials(ctx: any, materials: MaterialRow[], env: Env): Promise<void> {
-  // 1. Send text notes first
-  const textMaterials = materials.filter((m) => m.file_type === "text");
-  const mediaMaterials = materials.filter((m) => m.file_type !== "text");
-
   const backupChannelId = await getBackupChannelId(env);
 
-  for (const tm of textMaterials) {
-    let sent = false;
-    if (backupChannelId && tm.backup_message_id) {
+  // إرسال العناصر بالترتيب الدقيق داخل الفولدر مع تجميع الملفات المتتالية المتوافقة فقط
+  const sendSingleItem = async (m: MaterialRow) => {
+    if (m.file_type === "text") {
+      let sent = false;
+      if (backupChannelId && m.backup_message_id) {
+        try {
+          await ctx.api.copyMessage(ctx.chat!.id, backupChannelId, m.backup_message_id);
+          sent = true;
+        } catch (_) {
+          sent = false;
+        }
+      }
+      if (!sent) {
+        const actualText = m.caption || m.file_name;
+        if (actualText && actualText !== "text_content") {
+          await ctx.reply(actualText);
+        }
+      }
+      return;
+    }
+
+    const cap = m.caption || m.file_name;
+    try {
+      if (m.file_type === "video") {
+        await ctx.replyWithVideo(m.telegram_file_id, { caption: cap });
+      } else if (m.file_type === "photo") {
+        await ctx.replyWithPhoto(m.telegram_file_id, { caption: cap });
+      } else if (m.file_type === "audio") {
+        await ctx.replyWithAudio(m.telegram_file_id, { caption: cap });
+      } else {
+        await ctx.replyWithDocument(m.telegram_file_id, { caption: cap });
+      }
+    } catch (_) {
       try {
-        await ctx.api.copyMessage(ctx.chat!.id, backupChannelId, tm.backup_message_id);
-        sent = true;
-      } catch (err) {
-        sent = false;
-      }
+        await ctx.replyWithDocument(m.telegram_file_id, { caption: cap });
+      } catch (_) {}
     }
-    if (!sent) {
-      const actualText = tm.caption || tm.file_name;
-      if (actualText && actualText !== "text_content") {
-        await ctx.reply(actualText); // Plain text without Markdown parse_mode so URLs with '_' never crash
-      }
-    }
+  };
+
+  // 1. إرسال الملاحظات النصية أولاً
+  const textMaterials = materials.filter((m) => m.file_type === "text");
+  for (const tm of textMaterials) {
+    await sendSingleItem(tm);
   }
 
-  // 2. Send media files in chunks
-  const chunkSize = 10;
-  for (let i = 0; i < mediaMaterials.length; i += chunkSize) {
-    const chunk = mediaMaterials.slice(i, i + chunkSize);
+  // 2. تقسيم الملفات حسب النوع المتوافق في تليجرام (Documents، ثم Visual Media، ثم Audio)
+  // لضمان نجاح replyWithMediaGroup من أول مرة وعدم تداخل ملفات الفولدرات
+  const docMaterials = materials.filter((m) => m.file_type === "document" || m.file_type === "link");
+  const visualMaterials = materials.filter((m) => m.file_type === "photo" || m.file_type === "video");
+  const audioMaterials = materials.filter((m) => m.file_type === "audio");
 
-    const mediaGroup = chunk.map((m) => {
-      let type: "document" | "video" | "photo" | "audio" = "document";
-      if (m.file_type === "video") type = "video";
-      else if (m.file_type === "photo") type = "photo";
-      else if (m.file_type === "audio") type = "audio";
-      return {
-        type: type,
+  const sendCompatibleGroup = async (items: MaterialRow[]) => {
+    const chunkSize = 10;
+    for (let i = 0; i < items.length; i += chunkSize) {
+      const chunk = items.slice(i, i + chunkSize);
+      if (chunk.length === 1) {
+        await sendSingleItem(chunk[0]);
+        continue;
+      }
+      const mediaGroup = chunk.map((m) => ({
+        type: (m.file_type === "video" || m.file_type === "photo" || m.file_type === "audio"
+          ? m.file_type
+          : "document") as "document" | "video" | "photo" | "audio",
         media: m.telegram_file_id,
         caption: m.caption || m.file_name,
-      };
-    });
-
-    try {
-      if (mediaGroup.length === 1) {
-        const single = chunk[0];
-        if (single.file_type === "video") {
-          await ctx.replyWithVideo(single.telegram_file_id, { caption: single.caption || single.file_name });
-        } else if (single.file_type === "photo") {
-          await ctx.replyWithPhoto(single.telegram_file_id, { caption: single.caption || single.file_name });
-        } else if (single.file_type === "audio") {
-          await ctx.replyWithAudio(single.telegram_file_id, { caption: single.caption || single.file_name });
-        } else {
-          await ctx.replyWithDocument(single.telegram_file_id, { caption: single.caption || single.file_name });
-        }
-      } else {
+      }));
+      try {
         await ctx.replyWithMediaGroup(mediaGroup);
-      }
-    } catch (e: any) {
-      for (const m of chunk) {
-        try {
-          if (m.file_type === "photo") {
-            await ctx.replyWithPhoto(m.telegram_file_id, { caption: m.caption || m.file_name });
-          } else if (m.file_type === "video") {
-            await ctx.replyWithVideo(m.telegram_file_id, { caption: m.caption || m.file_name });
-          } else if (m.file_type === "audio") {
-            await ctx.replyWithAudio(m.telegram_file_id, { caption: m.caption || m.file_name });
-          } else {
-            await ctx.replyWithDocument(m.telegram_file_id, { caption: m.caption || m.file_name });
-          }
-        } catch (err) {}
+      } catch (_) {
+        for (const m of chunk) {
+          await sendSingleItem(m);
+        }
       }
     }
-  }
+  };
+
+  await sendCompatibleGroup(docMaterials);
+  await sendCompatibleGroup(visualMaterials);
+  await sendCompatibleGroup(audioMaterials);
 }

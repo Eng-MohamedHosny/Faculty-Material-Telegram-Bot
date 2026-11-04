@@ -235,12 +235,16 @@ export async function renderSubmissionTreeBrowser(
     kb.text("⬅️ رجوع للمجلد الأعلى", `sub_browse:${subId}:${currentNode.parent_id}`).row();
   }
 
+  kb.text(
+    sub.file_type === "text" ? "✏️ تعديل نص الرسالة قبل النشر" : "✏️ تعديل/إضافة وصف للملف",
+    `sub_edit_text:${subId}`
+  ).row();
   kb.text("🗑️ تجاهل وحذف المساهمة بصمت", `sub_ignore:${subId}`).row();
   kb.text("❌ إغلاق القائمة", "close_sub_pick");
 
   const statusText =
     `🧭 **تحديد مسار حفظ المساهمة الطلابية:**\n` +
-    `📄 الملف: **${sub.file_name}**\n\n` +
+    `📄 العنصر: \`${sub.file_name.replace(/`/g, "'")}\`\n\n` +
     `📍 **المسار المفتوح حالياً:**\n` +
     `\`${hierarchy.breadcrumb || currentNode.title}\`\n\n` +
     (children.length > 0
@@ -253,7 +257,7 @@ export async function renderSubmissionTreeBrowser(
     try {
       await ctx.editMessageText(statusText, { parse_mode: "Markdown", reply_markup: kb });
     } catch {
-      await ctx.reply(statusText, { parse_mode: "Markdown", reply_markup: kb });
+      await ctx.reply(statusText, { reply_markup: kb });
     }
   }
 }
